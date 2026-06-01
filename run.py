@@ -33,5 +33,5 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=True,
-        use_colors=False,  # PowerShell 下建议关闭，避免 [32m 乱码
+        use_colors=True, 
     )

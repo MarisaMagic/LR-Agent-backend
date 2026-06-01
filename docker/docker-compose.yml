@@ -47,6 +47,68 @@ services:
     volumes:
       - lr-agent-minio-data:/data
 
+  milvus-etcd:
+    container_name: lr-agent-milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.18
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      - lr-agent-milvus-etcd:/etcd
+    command: >
+      etcd -advertise-client-urls=http://milvus-etcd:2379
+      -listen-client-urls http://0.0.0.0:2379
+      --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  milvus-minio:
+    container_name: lr-agent-milvus-minio
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - lr-agent-milvus-minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  milvus:
+    container_name: lr-agent-milvus
+    image: milvusdb/milvus:v2.5.14
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      MINIO_REGION: us-east-1
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+    volumes:
+      - lr-agent-milvus-data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      milvus-etcd:
+        condition: service_started
+      milvus-minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+
   api:
     container_name: lr-agent-api
     image: lr-agent-api
@@ -60,6 +122,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
+      milvus:
+        condition: service_healthy
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -78,6 +142,8 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-noreply@example.com}
+      MILVUS_HOST: milvus
+      MILVUS_PORT: "19530"
     ports:
       - "8000:8000"
 
@@ -85,3 +151,6 @@ volumes:
   lr-agent-pg-data:
   lr-agent-redis-data:
   lr-agent-minio-data:
+  lr-agent-milvus-etcd:
+  lr-agent-milvus-minio:
+  lr-agent-milvus-data:
