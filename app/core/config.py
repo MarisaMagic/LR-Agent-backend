@@ -54,6 +54,28 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:1212"]
 
+    agent_router_enabled: bool = True
+    agent_max_tool_rounds: int = 2
+    agent_job_cancel_ttl_seconds: int = 3600
+    agent_default_max_context_tokens: int = 12_000
+    agent_default_reserve_completion_tokens: int = 2_048
+    agent_default_max_turns_in_window: int = 20
+    agent_default_summarize_trigger_ratio: float = 0.85
+    agent_default_min_turns_before_summarize: int = 6
+    agent_chat_cache_ttl_seconds: int = 2_592_000
+    agent_chat_sessions_index_limit: int = 500
+    agent_session_list_default_limit: int = 50
+    agent_session_list_max_limit: int = 100
+    agent_message_page_default_limit: int = 50
+    agent_message_page_max_limit: int = 100
+    agent_stream_rate_limit_per_minute: int = 10
+    agent_stream_rate_limit_per_day: int = 200
+    agent_session_write_rate_limit_per_hour: int = 60
+
+    llm_secrets_master_key: str | None = None
+    llm_secrets_active_key_id: str = "v1"
+    llm_base_url_allow_http: bool = False
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:

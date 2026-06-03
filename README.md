@@ -81,6 +81,19 @@ app/
 - Redis refresh token 轮换与 reuse 检测
 - 基础限流中间件
 
+## Phase 3 已实现（Agent P0/P1）
+
+- `GET/POST/PATCH/DELETE /api/v1/llm-providers` 大模型配置（API Key 使用 `LLM_SECRETS_MASTER_KEY` 加密，与 JWT `SECRET_KEY` 分离）
+- Agent 安全：SSRF 校验 `base_url`、`/agent/chat/cancel` 需登录且 job 归属校验、流式限流、SSE 错误脱敏
+- 删除会话级联删除消息；Redis 缓存 key 含 `user_id`
+- `POST /api/v1/llm-providers/{id}/default` 设置默认模型
+- `POST /api/v1/agent/chat/stream` SSE 流式对话（LangChain）
+- `POST /api/v1/agent/chat/cancel` 取消生成任务
+- `GET/POST/PATCH/DELETE /api/v1/agent/sessions` 会话 CRUD（列表游标分页 + 摘要字段）
+- `GET /api/v1/agent/sessions/{id}` 会话详情（消息 `before_message_id` 分页，默认最近 N 条）
+- 聊天记录 PostgreSQL 持久化 + Redis 热缓存
+- 意图路由（chat / assist）与只读轻工具（账户、帮助、客户端上下文）
+
 ## Phase 2 已实现
 
 - MinIO 头像上传（JPEG/PNG/WebP，Pillow 校验，多尺寸 WebP）

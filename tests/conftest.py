@@ -10,6 +10,10 @@ from sqlalchemy.pool import NullPool
 
 os.environ.setdefault("APP_ENV", "testing")
 
+from cryptography.fernet import Fernet
+
+os.environ.setdefault("LLM_SECRETS_MASTER_KEY", Fernet.generate_key().decode())
+
 from app.core.config import get_settings
 from app.core.deps import get_redis
 from app.db.session import get_db
