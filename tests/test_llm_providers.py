@@ -40,6 +40,8 @@ async def test_llm_provider_crud(
     assert created["id"] == provider_id
     assert created["is_default"] is True
     assert "****" in created["api_key"]
+    assert "supports_vision" in created
+    assert "vision_probe_detail" in created
 
     listing = await client.get("/api/v1/llm-providers", headers=headers)
     assert listing.status_code == 200

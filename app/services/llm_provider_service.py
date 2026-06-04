@@ -8,6 +8,7 @@ from app.core.config import Settings
 from app.models.llm_provider import LlmProvider
 from app.services.crypto_service import mask_api_key
 from app.services.llm_secrets import KEY_ID_ACTIVE, decrypt_api_key, encrypt_api_key, is_masked_api_key
+from app.services.llm_vision_probe import probe_vision_capability
 from app.services.url_safety import validate_llm_base_url
 
 
@@ -65,6 +66,7 @@ class LlmProviderService:
         )
         self.db.add(row)
         await self.db.flush()
+        await self.run_vision_probe(row)
         return row
 
     async def update(
@@ -95,7 +97,26 @@ class LlmProviderService:
             row.is_default = is_default
         row.updated_at = datetime.now(timezone.utc)
         await self.db.flush()
+        if base_url is not None or api_key is not None or model is not None:
+            await self.run_vision_probe(row)
         return row
+
+    async def run_vision_probe(self, row: LlmProvider) -> bool:
+        """Call API with a tiny image; persist supports_vision on the provider row."""
+        api_key = self.decrypt_api_key(row)
+        supports, detail = await probe_vision_capability(row, api_key)
+        row.supports_vision = supports
+        row.vision_probe_detail = detail[:512]
+        row.vision_probed_at = datetime.now(timezone.utc)
+        row.updated_at = datetime.now(timezone.utc)
+        await self.db.flush()
+        return supports
+
+    async def ensure_vision_probed(self, row: LlmProvider) -> bool:
+        """Probe once if never probed (e.g. rows created before migration)."""
+        if row.vision_probed_at is not None:
+            return bool(row.supports_vision)
+        return await self.run_vision_probe(row)
 
     async def delete(self, row: LlmProvider) -> None:
         await self.db.delete(row)
@@ -138,6 +159,11 @@ class LlmProviderService:
             "model": row.model,
             "enabled": row.enabled,
             "is_default": row.is_default,
+            "supports_vision": bool(row.supports_vision),
+            "vision_probed_at": (
+                int(row.vision_probed_at.timestamp() * 1000) if row.vision_probed_at else None
+            ),
+            "vision_probe_detail": row.vision_probe_detail or "",
             "created_at": created_ms,
             "updated_at": updated_ms,
         }

@@ -30,6 +30,12 @@ class LlmProvider(Base):
     model: Mapped[str] = mapped_column(String(128), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    supports_vision: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    vision_probed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    vision_probe_detail: Mapped[str] = mapped_column(String(512), nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -28,5 +28,8 @@ class LlmProviderPublic(BaseModel):
     model: str
     enabled: bool
     is_default: bool
+    supports_vision: bool = False
+    vision_probed_at: int | None = None
+    vision_probe_detail: str = ""
     created_at: int
     updated_at: int

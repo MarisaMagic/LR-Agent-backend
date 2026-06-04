@@ -6,7 +6,7 @@ LR_AGENT_HELP = """# LR-Agent 功能概览
 - **大模型配置**：添加 OpenAI 兼容 API（如通义、DeepSeek）
 - **Agent 面板**：右侧对话助手，支持工具查询账户与当前界面上下文
 
-复杂批量任务与自动标注流水线将在后续版本提供。"""
+在已打开的图片矩形框标注项目中，可在 Agent 对话中描述批量范围（如某文件夹、第 N 到 M 张），由 Agent 自动检测并生成候选标注，确认后应用。"""
 
 
 def get_lr_agent_help(topic: str | None = None) -> str:

@@ -4,12 +4,17 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-ROUTER_SYSTEM = """你是意图分类器。根据用户最新输入，判断应答模式：
-- chat：闲聊、概念解释、简单问答，不需要查账户或应用状态
-- assist：需要查询账户、应用功能说明、或依赖用户当前工作区/打开文件/标注项目等上下文
+from app.agent.annotation.llm_invoke import invoke_json_model
 
-domain 取 general / annotation / models / files / account 之一。
-confidence 为 0~1。不确定时 mode=chat 且 confidence 偏低。"""
+ROUTER_SYSTEM = """你是意图分类器。根据用户最新输入判断应答模式。
+
+输出 JSON：
+- mode：chat 或 assist（assist=需要账户/项目上下文/工具）
+- domain：general | annotation | models | files | account
+- confidence：0~1
+- reason：简短说明
+
+批量标注由客户端 Annotation 模式处理，不要将 mode 设为 annotate_batch。"""
 
 
 class RouteDecision(BaseModel):
@@ -20,18 +25,14 @@ class RouteDecision(BaseModel):
 
 
 async def classify_intent(llm: ChatOpenAI, user_content: str) -> RouteDecision:
-    structured = llm.with_structured_output(RouteDecision)
-    result = await structured.ainvoke(
+    decision = await invoke_json_model(
+        llm,
         [
             SystemMessage(content=ROUTER_SYSTEM),
             HumanMessage(content=user_content),
         ],
+        RouteDecision,
     )
-    if isinstance(result, RouteDecision):
-        decision = result
-    else:
-        decision = RouteDecision.model_validate(result)
-
     if decision.confidence < 0.6:
         decision.mode = "chat"
     return decision

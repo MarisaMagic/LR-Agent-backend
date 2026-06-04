@@ -45,9 +45,12 @@ async def check_agent_session_write_limit(
     user_id: UUID,
 ) -> None:
     uid = str(user_id)
+    limit = settings.agent_session_write_rate_limit_per_hour
+    if settings.is_development:
+        limit = max(limit, 500)
     await _check_limit(
         redis,
         f"lr:ratelimit:agent:session:hour:{uid}",
-        limit=settings.agent_session_write_rate_limit_per_hour,
+        limit=limit,
         window_seconds=3600,
     )

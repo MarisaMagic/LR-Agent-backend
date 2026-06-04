@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     llm_secrets_active_key_id: str = "v1"
     llm_base_url_allow_http: bool = False
 
+    # When true, batch annotation follows fusion-reasoning tool chain (ReAct sub-agent).
+    annotation_fusion_parity: bool = True
+    annotation_sub_agent_max_iterations: int = 12
+    annotation_sub_agent_max_rounds: int = 10
+    annotation_vision_map_concurrency: int = 3
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:

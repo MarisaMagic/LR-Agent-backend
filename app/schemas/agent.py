@@ -22,10 +22,23 @@ class ChatContextInput(BaseModel):
     config: ChatContextConfigInput | None = None
 
 
+class AnnotationProjectSnapshotInput(BaseModel):
+    project_id: str = Field(min_length=1, max_length=64)
+    name: str = ""
+    modality: str = ""
+    annotation_type: str = ""
+    labels: list[dict[str, Any]] = Field(default_factory=list)
+    detection_models: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class ClientContextInput(BaseModel):
     workspace_root: str | None = None
     active_file_path: str | None = None
     active_annotation_project_id: str | None = None
+    annotation_project_modality: str | None = None
+    annotation_project_type: str | None = None
+    agent_mode: Literal["chat", "annotation", "ask", "annotate"] | None = None
+    annotation_project_snapshot: AnnotationProjectSnapshotInput | None = None
 
 
 class ChatStreamRequest(BaseModel):
@@ -46,6 +59,42 @@ class AgentSessionCreateRequest(BaseModel):
     title: str = Field(default="新对话", max_length=256)
     provider_id: str | None = Field(default=None, max_length=64)
     model: str | None = Field(default=None, max_length=128)
+    annotation_project_id: str | None = Field(default=None, max_length=64)
+    interaction_mode: Literal["chat", "annotation"] | None = None
+
+
+class AgentMessageBlockPatchRequest(BaseModel):
+    block_type: str | None = Field(default=None, max_length=64)
+    block_index: int | None = Field(default=None, ge=0)
+    patch: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnnotationRunStartRequest(BaseModel):
+    provider_id: str = Field(min_length=1, max_length=64)
+    session_id: str = Field(min_length=1, max_length=64)
+    client_job_id: str = Field(min_length=1, max_length=64)
+    user_content: str = Field(min_length=1)
+    user_message_id: str = Field(min_length=1, max_length=64)
+    assistant_message_id: str = Field(min_length=1, max_length=64)
+    truncate_from_message_id: str | None = None
+    client_context: ClientContextInput | None = None
+
+
+class AnnotationRunEventsRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=64)
+    assistant_message_id: str = Field(min_length=1, max_length=64)
+    client_job_id: str = Field(min_length=1, max_length=64)
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    seq: int | None = Field(default=None, ge=0)
+
+
+class AnnotationRunFinalizeRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=64)
+    assistant_message_id: str = Field(min_length=1, max_length=64)
+    client_job_id: str = Field(min_length=1, max_length=64)
+    status: Literal["done", "error", "stopped"] = "done"
+    error: str | None = Field(default=None, max_length=4000)
+    user_content: str | None = Field(default=None, max_length=20_000)
 
 
 class AgentSessionPatchRequest(BaseModel):
@@ -70,6 +119,8 @@ class AgentMessagePublic(BaseModel):
 class AgentSessionPublic(BaseModel):
     id: str
     title: str
+    annotation_project_id: str | None = None
+    interaction_mode: str | None = None
     provider_id: str = ""
     model: str = ""
     message_ids: list[str] = Field(default_factory=list)
@@ -102,6 +153,9 @@ class StreamEventPayload(BaseModel):
     type: str
     content: str | None = None
     stage: str | None = None
+    status: str | None = None
+    detail: str | None = None
+    proposal: dict[str, Any] | None = None
     summary: str | None = None
     summary_up_to_message_id: str | None = None
     token_estimate: int | None = None
@@ -113,12 +167,39 @@ class StreamEventPayload(BaseModel):
     mode: str | None = None
     domain: str | None = None
 
+    @classmethod
+    def from_client_dict(cls, data: dict[str, Any]) -> "StreamEventPayload":
+        return cls(
+            type=str(data.get("type") or ""),
+            content=data.get("content"),
+            stage=data.get("stage"),
+            status=data.get("status"),
+            detail=data.get("detail"),
+            proposal=data.get("proposal"),
+            summary=data.get("summary"),
+            summary_up_to_message_id=data.get("summaryUpToMessageId") or data.get("summary_up_to_message_id"),
+            token_estimate=data.get("tokenEstimate") or data.get("token_estimate"),
+            tool_call_id=data.get("toolCallId") or data.get("tool_call_id"),
+            name=data.get("name"),
+            arguments=data.get("arguments"),
+            result=data.get("result"),
+            message=data.get("message"),
+            mode=data.get("mode"),
+            domain=data.get("domain"),
+        )
+
     def to_sse_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"type": self.type}
         if self.content is not None:
             data["content"] = self.content
         if self.stage is not None:
             data["stage"] = self.stage
+        if self.status is not None:
+            data["status"] = self.status
+        if self.detail is not None:
+            data["detail"] = self.detail
+        if self.proposal is not None:
+            data["proposal"] = self.proposal
         if self.summary is not None:
             data["summary"] = self.summary
         if self.summary_up_to_message_id is not None:

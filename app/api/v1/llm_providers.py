@@ -145,3 +145,21 @@ async def set_default_provider(
     row = await svc.set_default(row)
     await db.commit()
     return _to_public(svc, row)
+
+
+@router.post("/{provider_id}/probe-vision", response_model=LlmProviderPublic)
+async def probe_provider_vision(
+    provider_id: str,
+    current_user: CurrentUser,
+    db: DbSession,
+    settings: SettingsDep,
+) -> LlmProviderPublic:
+    """Re-run multimodal API probe for an existing provider."""
+    svc = LlmProviderService(db, settings)
+    pid = _parse_provider_id(provider_id)
+    row = await svc.get_for_user(pid, current_user.id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="provider_not_found")
+    await svc.run_vision_probe(row)
+    await db.commit()
+    return _to_public(svc, row)

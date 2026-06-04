@@ -9,16 +9,21 @@ from fastapi.responses import StreamingResponse
 from app.agent.orchestrator import ChatOrchestrator
 from app.core.deps import CurrentUser, DbSession, RedisClient, SettingsDep
 from app.schemas.agent import (
+    AgentMessageBlockPatchRequest,
     AgentSessionCreateRequest,
     AgentSessionDetailResponse,
     AgentSessionListResponse,
     AgentSessionPatchRequest,
     AgentSessionPublic,
+    AnnotationRunEventsRequest,
+    AnnotationRunFinalizeRequest,
+    AnnotationRunStartRequest,
     ChatCancelRequest,
     ChatStreamRequest,
 )
 from app.services.agent_chat_repository import AgentChatRepository
 from app.services.agent_job_service import AgentJobService
+from app.services.annotation_run_service import AnnotationRunService
 from app.services.agent_rate_limit import (
     check_agent_session_write_limit,
     check_agent_stream_limit,
@@ -61,6 +66,8 @@ async def list_agent_sessions(
     settings: SettingsDep,
     limit: int = Query(default=None, ge=1),
     cursor: str | None = None,
+    annotation_project_id: str | None = Query(default=None, max_length=64),
+    workspace_only: bool = Query(default=False),
 ) -> AgentSessionListResponse:
     page_limit = limit or settings.agent_session_list_default_limit
     page_limit = min(page_limit, settings.agent_session_list_max_limit)
@@ -70,6 +77,8 @@ async def list_agent_sessions(
             current_user.id,
             limit=page_limit,
             cursor=cursor,
+            annotation_project_id=annotation_project_id,
+            workspace_only=workspace_only,
         )
     except ValueError as exc:
         if str(exc) == "invalid_cursor":
@@ -102,6 +111,8 @@ async def create_agent_session(
         title=body.title,
         provider_id=body.provider_id,
         model=body.model,
+        annotation_project_id=body.annotation_project_id,
+        interaction_mode=body.interaction_mode,
     )
 
 
@@ -210,3 +221,85 @@ async def chat_cancel(
     if not cancelled:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
     return {"status": "cancelled"}
+
+
+def _annotation_run_http_error(exc: ValueError) -> HTTPException:
+    detail = str(exc)
+    code = status.HTTP_400_BAD_REQUEST
+    if detail in ("session_not_found", "llm_provider_not_found"):
+        code = status.HTTP_404_NOT_FOUND
+    if detail == "session_forbidden":
+        code = status.HTTP_403_FORBIDDEN
+    return HTTPException(status_code=code, detail=detail)
+
+
+@router.post("/annotation-run/start")
+async def annotation_run_start(
+    body: AnnotationRunStartRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+    redis: RedisClient,
+    settings: SettingsDep,
+) -> dict[str, str]:
+    await check_agent_session_write_limit(redis, settings, current_user.id)
+    svc = AnnotationRunService(db, redis, settings)
+    try:
+        return await svc.start_turn(current_user, body)
+    except ValueError as exc:
+        raise _annotation_run_http_error(exc) from exc
+
+
+@router.post("/annotation-run/events")
+async def annotation_run_events(
+    body: AnnotationRunEventsRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+    redis: RedisClient,
+    settings: SettingsDep,
+) -> dict[str, bool]:
+    svc = AnnotationRunService(db, redis, settings)
+    try:
+        return await svc.ingest_events(current_user, body)
+    except ValueError as exc:
+        raise _annotation_run_http_error(exc) from exc
+
+
+@router.post("/annotation-run/finalize")
+async def annotation_run_finalize(
+    body: AnnotationRunFinalizeRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+    redis: RedisClient,
+    settings: SettingsDep,
+) -> dict[str, bool]:
+    await check_agent_session_write_limit(redis, settings, current_user.id)
+    svc = AnnotationRunService(db, redis, settings)
+    try:
+        return await svc.finalize_turn(current_user, body)
+    except ValueError as exc:
+        raise _annotation_run_http_error(exc) from exc
+
+
+@router.patch("/messages/{message_id}/blocks")
+async def patch_agent_message_block(
+    message_id: str,
+    body: AgentMessageBlockPatchRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+    redis: RedisClient,
+    settings: SettingsDep,
+    session_id: str = Query(..., min_length=1, max_length=64),
+) -> dict[str, bool]:
+    await check_agent_session_write_limit(redis, settings, current_user.id)
+    repo = AgentChatRepository(db, redis, settings)
+    ok = await repo.patch_message_block(
+        current_user.id,
+        session_id,
+        message_id,
+        block_type=body.block_type,
+        block_index=body.block_index,
+        patch=body.patch,
+    )
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="message_or_block_not_found")
+    return {"ok": True}

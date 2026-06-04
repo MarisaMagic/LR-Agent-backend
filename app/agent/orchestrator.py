@@ -6,7 +6,8 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import assist_service, chat_service, context_service
-from app.agent.context_service import ASSIST_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, build_lc_messages
+from app.agent.context_service import CHAT_SYSTEM_PROMPT, build_lc_messages
+from app.agent.context_snapshot import build_ask_system_prompt
 from app.agent.llm_factory import build_chat_model
 from app.agent.router_service import RouteDecision, classify_intent
 from app.agent.tools.registry import build_tools_p1
@@ -91,10 +92,26 @@ class ChatOrchestrator:
 
         yield StreamEventPayload(type="preparing", stage="build_messages")
 
+        client_ctx = req.client_context
+        has_project_snapshot = bool(
+            client_ctx and client_ctx.annotation_project_snapshot is not None
+        )
+        chat_mode = not client_ctx or client_ctx.agent_mode in (
+            None,
+            "chat",
+            "ask",
+        )
+        ask_mode = chat_mode
+        system_prompt = (
+            build_ask_system_prompt(client_ctx)
+            if has_project_snapshot
+            else CHAT_SYSTEM_PROMPT
+        )
+
         lc_messages, token_estimate, needs_summarize = build_lc_messages(
             req,
             self.settings,
-            system_prompt=CHAT_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
         )
 
         final_status = "done"
@@ -129,7 +146,7 @@ class ChatOrchestrator:
                 lc_messages, token_estimate, _ = build_lc_messages(
                     req,
                     self.settings,
-                    system_prompt=CHAT_SYSTEM_PROMPT,
+                    system_prompt=system_prompt,
                 )
 
             route = RouteDecision(
@@ -138,7 +155,7 @@ class ChatOrchestrator:
                 domain="general",
                 reason="router_disabled",
             )
-            if self.settings.agent_router_enabled and not await cancelled():
+            if self.settings.agent_router_enabled and not await cancelled() and not ask_mode:
                 try:
                     route = await classify_intent(llm, req.user_content)
                 except Exception:
@@ -148,17 +165,26 @@ class ChatOrchestrator:
                         domain="general",
                         reason="router_failed",
                     )
+            elif ask_mode and has_project_snapshot:
+                route = RouteDecision(
+                    mode="assist",
+                    confidence=1.0,
+                    domain="annotation",
+                    reason="ask_mode_with_project",
+                )
+            if not await cancelled():
                 yield StreamEventPayload(
                     type="route_decided",
                     mode=route.mode,
                     domain=route.domain,
                 )
 
-            if route.mode == "assist":
+            use_assist = route.mode == "assist" or (ask_mode and has_project_snapshot)
+            if use_assist:
                 lc_messages, _, _ = build_lc_messages(
                     req,
                     self.settings,
-                    system_prompt=ASSIST_SYSTEM_PROMPT,
+                    system_prompt=system_prompt,
                 )
                 tools = build_tools_p1(user, req.client_context)
                 stream = assist_service.stream_assist(

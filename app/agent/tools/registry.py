@@ -3,6 +3,7 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool
 
+from app.agent.context_snapshot import format_snapshot_for_prompt
 from app.agent.tools.help import get_lr_agent_help
 from app.models.user import User
 from app.schemas.agent import ClientContextInput
@@ -31,9 +32,20 @@ def build_tools_p1(
             parts.append(f"当前打开文件: {client_context.active_file_path}")
         if client_context.active_annotation_project_id:
             parts.append(f"当前标注项目 ID: {client_context.active_annotation_project_id}")
+        if client_context.annotation_project_modality:
+            parts.append(f"任务模态: {client_context.annotation_project_modality}")
+        if client_context.annotation_project_type:
+            parts.append(f"标注类型: {client_context.annotation_project_type}")
+        if client_context.agent_mode:
+            parts.append(f"交互模式: {client_context.agent_mode}")
         if not parts:
             return "工作区已连接，但未打开具体文件或标注项目。"
         return "\n".join(parts)
+
+    def describe_annotation_project() -> str:
+        if client_context is None or client_context.annotation_project_snapshot is None:
+            return "当前未绑定标注项目快照。请确认用户已在标注任务中打开项目。"
+        return format_snapshot_for_prompt(client_context.annotation_project_snapshot)
 
     def help_tool(topic: str | None = None) -> str:
         return get_lr_agent_help(topic)
@@ -53,6 +65,11 @@ def build_tools_p1(
             func=describe_context,
             name="describe_client_context",
             description="描述用户当前 Electron 客户端界面上下文（工作区、打开文件、标注项目）",
+        ),
+        StructuredTool.from_function(
+            func=describe_annotation_project,
+            name="describe_annotation_project",
+            description="获取当前标注项目的标签树、任务类型、模态与可用检测模型列表",
         ),
     ]
 

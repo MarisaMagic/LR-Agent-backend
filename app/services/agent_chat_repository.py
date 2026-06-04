@@ -19,6 +19,7 @@ from app.schemas.agent import (
 )
 from app.services.agent_chat_blocks import (
     apply_stream_event_to_blocks,
+    blocks_to_preview,
     blocks_to_text,
     collapse_assistant_blocks,
 )
@@ -40,11 +41,29 @@ def _build_session_title(content: str) -> str:
 
 
 def _build_message_preview(blocks_json: list[dict[str, Any]], *, max_len: int = 128) -> str:
-    text = blocks_to_text(blocks_json)
-    line = " ".join(text.strip().split())
-    if not line:
-        return ""
-    return f"{line[:max_len]}…" if len(line) > max_len else line
+    return blocks_to_preview(blocks_json, max_len=max_len)
+
+
+def _annotation_title_from_blocks(blocks_json: list[dict[str, Any]]) -> str | None:
+    for block in blocks_json:
+        if block.get("type") != "annotation_proposal":
+            continue
+        proposal = block.get("proposal")
+        if not isinstance(proposal, dict):
+            continue
+        summary = str(proposal.get("summary") or "").strip()
+        if summary:
+            return _build_session_title(summary)
+        stats = proposal.get("stats")
+        if isinstance(stats, dict):
+            succeeded = int(stats.get("succeeded") or 0)
+            total_boxes = int(stats.get("totalBoxes") or stats.get("total_boxes") or 0)
+            if succeeded:
+                base = f"批量标注 {succeeded} 张"
+                if total_boxes:
+                    return f"{base} · {total_boxes} 框"
+                return base
+    return None
 
 
 class AgentChatRepository:
@@ -73,11 +92,17 @@ class AgentChatRepository:
         *,
         limit: int = 50,
         cursor: str | None = None,
+        annotation_project_id: str | None = None,
+        workspace_only: bool = False,
     ) -> tuple[list[AgentSessionPublic], str | None, bool]:
         stmt = select(AgentSession).where(
             AgentSession.user_id == user_id,
             AgentSession.deleted_at.is_(None),
         )
+        if workspace_only:
+            stmt = stmt.where(AgentSession.annotation_project_id.is_(None))
+        elif annotation_project_id is not None:
+            stmt = stmt.where(AgentSession.annotation_project_id == annotation_project_id)
         if cursor:
             try:
                 cursor_dt, cursor_id = decode_session_cursor(cursor)
@@ -99,6 +124,8 @@ class AgentChatRepository:
         out: list[AgentSessionPublic] = []
         for row in page_rows:
             count, preview = summaries.get(row.id, (0, None))
+            if count <= 0:
+                continue
             out.append(self._row_to_session_summary_public(row, count, preview))
 
         next_cursor: str | None = None
@@ -149,12 +176,16 @@ class AgentChatRepository:
         title: str = "新对话",
         provider_id: str | None = None,
         model: str | None = None,
+        annotation_project_id: str | None = None,
+        interaction_mode: str | None = None,
     ) -> AgentSessionPublic:
         now = datetime.now(timezone.utc)
         row = AgentSession(
             id=session_id,
             user_id=user_id,
             title=title,
+            annotation_project_id=annotation_project_id,
+            interaction_mode=interaction_mode,
             provider_id=provider_id,
             model=model,
             created_at=now,
@@ -253,6 +284,7 @@ class AgentChatRepository:
                 row.model = provider_model
             row.updated_at = now
 
+        self._sync_session_from_client_context(row, req.client_context)
         await self.db.flush()
 
         if req.truncate_from_message_id:
@@ -326,6 +358,8 @@ class AgentChatRepository:
             "reasoning_delta",
             "tool_start",
             "tool_result",
+            "annotation_progress",
+            "annotation_proposal",
         ):
             return
 
@@ -381,6 +415,117 @@ class AgentChatRepository:
             await self.db.flush()
             await self._rebuild_cache(user_id, session_id)
 
+    async def try_advance_event_seq(
+        self,
+        user_id: uuid.UUID,
+        client_job_id: str,
+        seq: int | None,
+    ) -> bool:
+        """Return False if seq is duplicate (idempotent retry)."""
+        if seq is None:
+            return True
+        key = f"agent:u:{user_id}:ann-run:{client_job_id}:seq"
+        last_raw = await self.cache.redis.get(key)
+        if last_raw is not None:
+            try:
+                last = int(last_raw)
+            except ValueError:
+                last = -1
+            if seq <= last:
+                return False
+        ttl = self.settings.agent_job_cancel_ttl_seconds
+        await self.cache.redis.set(key, str(seq), ex=ttl)
+        return True
+
+    async def apply_stream_events_batch(
+        self,
+        user_id: uuid.UUID,
+        session_id: str,
+        message_id: str,
+        events: list[StreamEventPayload],
+    ) -> None:
+        for event in events:
+            await self.apply_stream_event(user_id, session_id, message_id, event)
+
+    async def finalize_annotation_turn(
+        self,
+        user_id: uuid.UUID,
+        session_id: str,
+        message_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        user_content: str | None = None,
+    ) -> None:
+        await self.finalize_assistant_message(
+            user_id,
+            session_id,
+            message_id,
+            status=status,
+            error=error,
+        )
+        session_row = await self.get_session_for_user(user_id, session_id)
+        if session_row is None:
+            return
+        result = await self.db.execute(
+            select(AgentMessage).where(AgentMessage.id == message_id),
+        )
+        msg_row = result.scalar_one_or_none()
+        if msg_row is not None:
+            ann_title = _annotation_title_from_blocks(msg_row.blocks_json)
+            if ann_title:
+                session_row.title = ann_title
+            elif user_content and session_row.title in ("新对话", ""):
+                session_row.title = _build_session_title(user_content)
+        session_row.updated_at = datetime.now(timezone.utc)
+        await self.db.flush()
+        await self._rebuild_cache(user_id, session_id)
+
+    async def patch_message_block(
+        self,
+        user_id: uuid.UUID,
+        session_id: str,
+        message_id: str,
+        *,
+        block_type: str | None = None,
+        block_index: int | None = None,
+        patch: dict[str, Any],
+    ) -> bool:
+        session_row = await self.get_session_for_user(user_id, session_id)
+        if session_row is None:
+            return False
+        result = await self.db.execute(
+            select(AgentMessage).where(
+                AgentMessage.id == message_id,
+                AgentMessage.session_id == session_id,
+                AgentMessage.user_id == user_id,
+            ),
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False
+
+        blocks = [dict(b) for b in (row.blocks_json or [])]
+        target_idx = block_index
+        if target_idx is None and block_type:
+            target_idx = next(
+                (i for i, b in enumerate(blocks) if b.get("type") == block_type),
+                -1,
+            )
+        if target_idx is None or target_idx < 0 or target_idx >= len(blocks):
+            return False
+
+        blocks[target_idx] = {**blocks[target_idx], **patch}
+        row.blocks_json = blocks
+        row.updated_at = datetime.now(timezone.utc)
+        await self.db.flush()
+        uid = str(user_id)
+        await self.cache.set_message(uid, session_id, self._row_to_message_cache(row))
+        session_row.updated_at = datetime.now(timezone.utc)
+        await self.db.flush()
+        await self._rebuild_cache(user_id, session_id)
+        return True
+
     async def update_session_summary(
         self,
         user_id: uuid.UUID,
@@ -418,6 +563,20 @@ class AgentChatRepository:
         await self.db.flush()
 
     # --- internal helpers ---
+
+    @staticmethod
+    def _sync_session_from_client_context(row: AgentSession, client_context: Any | None) -> None:
+        if client_context is None:
+            return
+        pid = getattr(client_context, "active_annotation_project_id", None)
+        if pid and not row.annotation_project_id:
+            row.annotation_project_id = str(pid)
+        mode = getattr(client_context, "agent_mode", None)
+        if mode in ("annotation", "annotate"):
+            row.interaction_mode = "annotation"
+        elif mode in ("chat", "ask", None):
+            if mode == "chat":
+                row.interaction_mode = "chat"
 
     async def _message_ids_from_db(self, session_id: str) -> list[str]:
         result = await self.db.execute(
@@ -663,6 +822,8 @@ class AgentChatRepository:
         return AgentSessionPublic(
             id=row.id,
             title=row.title,
+            annotation_project_id=row.annotation_project_id,
+            interaction_mode=row.interaction_mode,
             provider_id=row.provider_id or "",
             model=row.model or "",
             message_ids=[],
