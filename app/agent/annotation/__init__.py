@@ -11,13 +11,9 @@ from app.agent.annotation.map_service import (
 from app.agent.annotation.scope_parse_service import parse_batch_scope_single_shot
 from app.agent.annotation.batch_prepare_service import prepare_batch_annotation
 from app.agent.annotation.plan_service import create_batch_plan
-from app.agent.annotation.scope_agent_service import resolve_scope_with_agent
-from app.agent.annotation.scope_service import parse_image_scope
 
 __all__ = [
     "classify_annotation_intent",
-    "parse_image_scope",
-    "resolve_scope_with_agent",
     "create_batch_plan",
     "prepare_batch_annotation",
     "map_detection_boxes",

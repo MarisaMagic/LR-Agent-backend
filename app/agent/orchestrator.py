@@ -7,9 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import assist_service, chat_service, context_service
 from app.agent.context_service import CHAT_SYSTEM_PROMPT, build_lc_messages
-from app.agent.context_snapshot import build_ask_system_prompt
+from app.agent.context_snapshot import (
+    build_assist_system_prompt,
+    format_runtime_identity_block,
+)
 from app.agent.llm_factory import build_chat_model
-from app.agent.router_service import RouteDecision, classify_intent
+from app.agent.turn_context import build_turn_context_from_messages, turn_context_to_chat_inputs
+from app.agent.turn_understanding_service import (
+    TurnUnderstandingResult,
+    format_understanding_for_system_prompt,
+    understand_turn,
+)
 from app.agent.tools.registry import build_tools_p1
 from app.core.config import Settings
 from app.models.user import User
@@ -84,7 +92,19 @@ class ChatOrchestrator:
             yield StreamEventPayload(type="error", message="prepare_turn_failed")
             return
 
-        req.messages = chat_inputs
+        turn_ctx = build_turn_context_from_messages(
+            chat_inputs,
+            current_user_content=req.user_content,
+            summary=session_row.context_summary,
+            summary_up_to_message_id=session_row.summary_up_to_message_id,
+            max_turns_in_window=(
+                req.context.config.max_turns_in_window
+                if req.context and req.context.config
+                else self.settings.agent_default_max_turns_in_window
+            ),
+            exclude_message_ids={assistant_id},
+        )
+        req.messages = turn_context_to_chat_inputs(turn_ctx)
         if req.context is None:
             req.context = ChatContextInput()
         req.context.summary = session_row.context_summary
@@ -96,17 +116,73 @@ class ChatOrchestrator:
         has_project_snapshot = bool(
             client_ctx and client_ctx.annotation_project_snapshot is not None
         )
-        chat_mode = not client_ctx or client_ctx.agent_mode in (
-            None,
-            "chat",
-            "ask",
+        has_workspace = bool(
+            client_ctx and (client_ctx.workspace_root or "").strip()
         )
-        ask_mode = chat_mode
-        system_prompt = (
-            build_ask_system_prompt(client_ctx)
-            if has_project_snapshot
-            else CHAT_SYSTEM_PROMPT
+        has_assist_tools = has_project_snapshot or has_workspace
+
+        provider_is_vision = False
+        if not await cancelled():
+            try:
+                provider_is_vision = await provider_svc.ensure_vision_probed(row)
+            except Exception:
+                logger.exception(
+                    "vision probe failed session=%s user=%s",
+                    req.session_id,
+                    user.id,
+                )
+
+        identity = format_runtime_identity_block(
+            model=row.model,
+            provider_label=row.name,
+            supports_vision=provider_is_vision,
         )
+
+        if has_assist_tools:
+            system_prompt = build_assist_system_prompt(
+                client_ctx,
+                model=row.model,
+                provider_label=row.name,
+                supports_vision=provider_is_vision,
+            )
+        else:
+            system_prompt = f"{identity}\n\n{CHAT_SYSTEM_PROMPT}"
+
+        understanding: TurnUnderstandingResult | None = None
+        if client_ctx and client_ctx.turn_understanding is not None:
+            tu = client_ctx.turn_understanding
+            understanding = TurnUnderstandingResult(
+                resolved_user_content=tu.resolved_user_content or req.user_content,
+                referenced_relative_paths=list(tu.referenced_relative_paths or []),
+                resolved_active_relative_path=tu.resolved_active_relative_path,
+                task_intent=tu.task_intent or "converse",
+                turn_kind=tu.turn_kind,
+                needs_vision_input=bool(tu.needs_vision_input),
+                confidence=float(tu.confidence),
+                scope_notes=tu.scope_notes or "",
+                reason=tu.reason or "client",
+                user_visible_hint=tu.user_visible_hint,
+            )
+        elif has_assist_tools and not await cancelled():
+            try:
+                understanding = await understand_turn(
+                    llm,
+                    user_content=req.user_content,
+                    client_context=client_ctx,
+                    conversation_transcript=turn_ctx.transcript,
+                    provider_is_vision=provider_is_vision,
+                )
+            except Exception:
+                logger.exception(
+                    "turn understand failed session=%s user=%s",
+                    req.session_id,
+                    user.id,
+                )
+
+        if understanding is not None:
+            system_prompt = (
+                f"{system_prompt}\n\n{format_understanding_for_system_prompt(understanding)}"
+            )
 
         lc_messages, token_estimate, needs_summarize = build_lc_messages(
             req,
@@ -149,50 +225,34 @@ class ChatOrchestrator:
                     system_prompt=system_prompt,
                 )
 
-            route = RouteDecision(
-                mode="chat",
-                confidence=1.0,
-                domain="general",
-                reason="router_disabled",
-            )
-            if self.settings.agent_router_enabled and not await cancelled() and not ask_mode:
-                try:
-                    route = await classify_intent(llm, req.user_content)
-                except Exception:
-                    route = RouteDecision(
-                        mode="chat",
-                        confidence=0.5,
-                        domain="general",
-                        reason="router_failed",
-                    )
-            elif ask_mode and has_project_snapshot:
-                route = RouteDecision(
-                    mode="assist",
-                    confidence=1.0,
-                    domain="annotation",
-                    reason="ask_mode_with_project",
-                )
             if not await cancelled():
                 yield StreamEventPayload(
                     type="route_decided",
-                    mode=route.mode,
-                    domain=route.domain,
+                    mode="assist" if has_assist_tools else "chat",
+                    domain="annotation" if has_project_snapshot else "general",
                 )
 
-            use_assist = route.mode == "assist" or (ask_mode and has_project_snapshot)
-            if use_assist:
-                lc_messages, _, _ = build_lc_messages(
-                    req,
-                    self.settings,
-                    system_prompt=system_prompt,
+            if has_assist_tools:
+                tools = build_tools_p1(
+                    user,
+                    req.client_context,
+                    settings=self.settings,
+                    provider_is_vision=provider_is_vision,
                 )
-                tools = build_tools_p1(user, req.client_context)
                 stream = assist_service.stream_assist(
                     llm,
                     lc_messages,
                     tools,
+                    settings=self.settings,
                     max_tool_rounds=self.settings.agent_max_tool_rounds,
                     is_cancelled=cancelled,
+                    provider_is_vision=provider_is_vision,
+                    needs_vision_input=bool(
+                        understanding and understanding.needs_vision_input
+                    ),
+                    client_context=client_ctx,
+                    understanding=understanding,
+                    user_content=req.user_content,
                 )
             else:
                 stream = chat_service.stream_chat(llm, lc_messages)
@@ -208,7 +268,7 @@ class ChatOrchestrator:
 
             if await cancelled():
                 final_status = "stopped"
-        except Exception as exc:
+        except Exception:
             final_status = "error"
             error_message = "stream_failed"
             logger.exception("chat stream failed session=%s user=%s", req.session_id, user.id)

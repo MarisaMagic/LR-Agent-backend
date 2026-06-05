@@ -1,6 +1,9 @@
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from redis.asyncio import Redis
 from sqlalchemy import delete, func, select, tuple_, update
@@ -25,6 +28,13 @@ from app.services.agent_chat_blocks import (
 )
 from app.services.agent_chat_cache import AgentChatCache
 from app.services.agent_session_cursor import decode_session_cursor, encode_session_cursor
+
+
+def normalize_message_interaction_mode(agent_mode: str | None) -> str:
+    """Persisted per-message mode: chat (Ask) or annotation (Agent)."""
+    if agent_mode in ("annotation", "annotate"):
+        return "annotation"
+    return "chat"
 
 
 def _dt_to_ms(value: datetime | None) -> int:
@@ -287,6 +297,10 @@ class AgentChatRepository:
         self._sync_session_from_client_context(row, req.client_context)
         await self.db.flush()
 
+        msg_mode = normalize_message_interaction_mode(
+            getattr(req.client_context, "agent_mode", None) if req.client_context else None,
+        )
+
         if req.truncate_from_message_id:
             await self._truncate_after_message(
                 user_id,
@@ -301,6 +315,7 @@ class AgentChatRepository:
                 provider_id=req.provider_id,
                 model=provider_model,
                 replace_at_id=req.truncate_from_message_id,
+                interaction_mode=msg_mode,
             )
         else:
             await self._append_user_message(
@@ -310,6 +325,7 @@ class AgentChatRepository:
                 content=req.user_content,
                 provider_id=req.provider_id,
                 model=provider_model,
+                interaction_mode=msg_mode,
             )
 
         await self._append_assistant_placeholder(
@@ -318,13 +334,20 @@ class AgentChatRepository:
             message_id=assistant_message_id,
             provider_id=req.provider_id,
             model=provider_model,
+            interaction_mode=msg_mode,
         )
 
         chat_inputs = await self.build_chat_message_inputs(req.session_id)
         await self._rebuild_cache(user_id, req.session_id)
         return chat_inputs, row
 
-    async def build_chat_message_inputs(self, session_id: str) -> list[ChatMessageInput]:
+    async def build_chat_message_inputs(
+        self,
+        session_id: str,
+        *,
+        up_to_message_id: str | None = None,
+        exclude_message_ids: set[str] | None = None,
+    ) -> list[ChatMessageInput]:
         result = await self.db.execute(
             select(AgentMessage)
             .where(
@@ -333,17 +356,41 @@ class AgentChatRepository:
             )
             .order_by(AgentMessage.sort_index.asc()),
         )
-        rows = result.scalars().all()
+        rows = list(result.scalars().all())
+        max_sort: int | None = None
+        if up_to_message_id:
+            for row in rows:
+                if row.id == up_to_message_id:
+                    max_sort = row.sort_index
+                    break
+            if max_sort is not None:
+                rows = [r for r in rows if r.sort_index <= max_sort]
+
+        exclude = exclude_message_ids or set()
         inputs: list[ChatMessageInput] = []
         for row in rows:
+            if row.id in exclude:
+                continue
             if row.role not in ("user", "assistant"):
                 continue
             text = blocks_to_text(row.blocks_json)
+            if not text.strip():
+                text = blocks_to_preview(row.blocks_json, max_len=400)
             if not text.strip() and row.status == "streaming":
                 continue
             if not text.strip():
                 continue
-            inputs.append(ChatMessageInput(role=row.role, content=text))
+            parsed_mode: str | None = None
+            if row.interaction_mode in ("chat", "annotation"):
+                parsed_mode = row.interaction_mode
+            inputs.append(
+                ChatMessageInput(
+                    role=row.role,  # type: ignore[arg-type]
+                    content=text,
+                    message_id=row.id,
+                    interaction_mode=parsed_mode,  # type: ignore[arg-type]
+                ),
+            )
         return inputs
 
     async def apply_stream_event(
@@ -634,6 +681,7 @@ class AgentChatRepository:
         provider_id: str,
         model: str | None,
         replace_at_id: str,
+        interaction_mode: str | None = None,
     ) -> None:
         result = await self.db.execute(
             select(AgentMessage).where(AgentMessage.id == replace_at_id),
@@ -652,6 +700,7 @@ class AgentChatRepository:
                     sort_index=sort_index,
                     blocks_json=blocks,
                     status="done",
+                    interaction_mode=interaction_mode,
                     provider_id=provider_id,
                     model=model,
                     created_at=now,
@@ -663,6 +712,7 @@ class AgentChatRepository:
             row.status = "done"
             row.provider_id = provider_id
             row.model = model
+            row.interaction_mode = interaction_mode
             row.updated_at = now
         await self.db.flush()
 
@@ -675,12 +725,22 @@ class AgentChatRepository:
         content: str,
         provider_id: str,
         model: str | None,
+        interaction_mode: str | None = None,
     ) -> None:
         existing = await self.db.execute(
-            select(AgentMessage.id).where(AgentMessage.id == message_id),
+            select(AgentMessage).where(AgentMessage.id == message_id),
         )
-        if existing.scalar_one_or_none() is not None:
-            return
+        existing_row = existing.scalar_one_or_none()
+        if existing_row is not None:
+            if existing_row.role == "user":
+                return
+            logger.warning(
+                "user_message_id_conflict session=%s message_id=%s role=%s",
+                session_id,
+                message_id,
+                existing_row.role,
+            )
+            raise ValueError("user_message_id_conflict")
         now = datetime.now(timezone.utc)
         sort_index = await self._next_sort_index(session_id)
         self.db.add(
@@ -692,6 +752,7 @@ class AgentChatRepository:
                 sort_index=sort_index,
                 blocks_json=[{"type": "text", "content": content}],
                 status="done",
+                interaction_mode=interaction_mode,
                 provider_id=provider_id,
                 model=model,
                 created_at=now,
@@ -708,6 +769,7 @@ class AgentChatRepository:
         message_id: str,
         provider_id: str,
         model: str | None,
+        interaction_mode: str | None = None,
     ) -> None:
         existing = await self.db.execute(
             select(AgentMessage.id).where(AgentMessage.id == message_id),
@@ -720,6 +782,7 @@ class AgentChatRepository:
                     blocks_json=[],
                     status="streaming",
                     error=None,
+                    interaction_mode=interaction_mode,
                     updated_at=datetime.now(timezone.utc),
                 ),
             )
@@ -737,6 +800,7 @@ class AgentChatRepository:
                 sort_index=sort_index,
                 blocks_json=[],
                 status="streaming",
+                interaction_mode=interaction_mode,
                 provider_id=provider_id,
                 model=model,
                 created_at=now,
@@ -914,6 +978,7 @@ class AgentChatRepository:
             role=row.role,
             blocks=row.blocks_json,
             status=row.status,
+            interaction_mode=row.interaction_mode,
             provider_id=row.provider_id or "",
             model=row.model or "",
             error=row.error,
@@ -928,6 +993,7 @@ class AgentChatRepository:
             role=str(data["role"]),
             blocks=data.get("blocks") or [],
             status=str(data.get("status") or "done"),
+            interaction_mode=data.get("interaction_mode"),
             provider_id=str(data.get("provider_id") or ""),
             model=str(data.get("model") or ""),
             error=data.get("error"),
@@ -942,6 +1008,7 @@ class AgentChatRepository:
             "role": row.role,
             "blocks": row.blocks_json,
             "status": row.status,
+            "interaction_mode": row.interaction_mode,
             "provider_id": row.provider_id or "",
             "model": row.model or "",
             "error": row.error,

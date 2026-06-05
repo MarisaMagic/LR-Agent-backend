@@ -104,21 +104,6 @@ def expand_detection_aliases(terms: list[str]) -> list[str]:
     return out
 
 
-def detection_label_matches(label: str, patterns: list[str]) -> bool:
-    if not patterns:
-        return False
-    norm = normalize_detection_label(label)
-    if not norm:
-        return False
-    for pattern in patterns:
-        pn = normalize_detection_label(pattern)
-        if not pn:
-            continue
-        if norm == pn or pn in norm or norm in pn:
-            return True
-    return False
-
-
 def _extract_scope_terms(text: str, pattern: re.Pattern[str]) -> list[str]:
     terms: list[str] = []
     for m in pattern.finditer(text):
@@ -198,70 +183,6 @@ def merge_annotation_scope(
     if not base.exclude_label_names and inferred.exclude_label_names:
         base.exclude_label_names = inferred.exclude_label_names
     return base
-
-
-def box_detection_class(box: dict) -> str:
-    return str(
-        box.get("detection_label")
-        or box.get("class_name")
-        or box.get("detection_class")
-        or box.get("label")
-        or ""
-    ).strip()
-
-
-def is_detection_box_in_scope(box: dict, scope: AnnotationScope) -> bool:
-    if not scope.is_restricted():
-        return True
-    det = box_detection_class(box)
-    includes = expand_detection_aliases(scope.include_detection_labels)
-    excludes = expand_detection_aliases(scope.exclude_detection_labels)
-    if includes and not detection_label_matches(det, includes):
-        return False
-    if excludes and detection_label_matches(det, excludes):
-        return False
-    return True
-
-
-def filter_detection_boxes_by_scope(
-    boxes: list[dict],
-    scope: AnnotationScope,
-) -> dict[str, Any]:
-    if not boxes:
-        return {
-            "boxes": [],
-            "excluded": [],
-            "raw_count": 0,
-            "scoped_count": 0,
-            "scope_applied": scope.is_restricted(),
-        }
-    in_scope: list[dict] = []
-    excluded: list[dict[str, Any]] = []
-    for idx, box in enumerate(boxes):
-        if not isinstance(box, dict):
-            continue
-        entry = dict(box)
-        det = box_detection_class(entry)
-        if det and "detection_label" not in entry:
-            entry["detection_label"] = det
-        if is_detection_box_in_scope(entry, scope):
-            in_scope.append(entry)
-        else:
-            excluded.append(
-                {
-                    "index": idx,
-                    "detection_label": det,
-                    "reason": "不在用户标注范围内",
-                }
-            )
-    return {
-        "boxes": in_scope,
-        "excluded": excluded,
-        "raw_count": len(boxes),
-        "scoped_count": len(in_scope),
-        "scope_applied": scope.is_restricted(),
-        "scope_summary": scope.scope_summary,
-    }
 
 
 def filter_label_candidates_by_scope(

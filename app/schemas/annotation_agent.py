@@ -42,12 +42,17 @@ class BatchPrepareRequest(AnnotationLlmBaseRequest):
     """Single-shot scope + plan (replaces separate parse-task / parse-scope / create-plan in batch)."""
 
     user_request: str = Field(min_length=1, max_length=20_000)
+    preselected_paths: list[str] = Field(
+        default_factory=list,
+        description="回合理解确定的图片路径；非空则跳过选图，仅生成执行计划",
+    )
+    session_id: str | None = Field(default=None, max_length=64)
     current_relative_path: str = ""
     candidates: list[ImageCandidateInput] = Field(default_factory=list)
     label_candidates: list[dict[str, Any]] = Field(default_factory=list)
     detection_models: list[dict[str, Any]] = Field(default_factory=list)
-    default_conf_threshold: float = Field(default=0.25, ge=0.05, le=0.95)
-    default_iou_threshold: float = Field(default=0.45, ge=0.05, le=0.95)
+    default_conf_threshold: float = Field(default=0.7, ge=0.05, le=0.95)
+    default_iou_threshold: float = Field(default=0.5, ge=0.05, le=0.95)
     project: AnnotationProjectSnapshotInput | None = None
 
 
@@ -58,8 +63,8 @@ class CreatePlanRequest(AnnotationLlmBaseRequest):
     label_candidates: list[dict[str, Any]] = Field(default_factory=list)
     detection_models: list[dict[str, Any]] = Field(default_factory=list)
     image_count: int = Field(ge=0, le=500)
-    default_conf_threshold: float = Field(default=0.25, ge=0.05, le=0.95)
-    default_iou_threshold: float = Field(default=0.45, ge=0.05, le=0.95)
+    default_conf_threshold: float = Field(default=0.7, ge=0.05, le=0.95)
+    default_iou_threshold: float = Field(default=0.5, ge=0.05, le=0.95)
 
 
 class MapBoxesRequest(AnnotationLlmBaseRequest):

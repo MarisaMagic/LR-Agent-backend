@@ -31,7 +31,9 @@ from app.agent.annotation.sub_image_run_service import (
 from app.agent.annotation.sub_image_run_session import create_session
 from app.agent.llm_factory import build_chat_model
 from app.core.config import Settings
-from app.core.deps import CurrentUser, DbSession, SettingsDep
+from app.agent.turn_context import build_turn_context
+from app.core.deps import CurrentUser, DbSession, RedisClient, SettingsDep
+from app.services.agent_chat_repository import AgentChatRepository
 from app.schemas.annotation_agent import (
     AgentTurnRequest,
     BatchPrepareRequest,
@@ -333,6 +335,7 @@ async def api_batch_prepare(
     body: BatchPrepareRequest,
     current_user: CurrentUser,
     db: DbSession,
+    redis: RedisClient,
     settings: SettingsDep,
 ):
     try:
@@ -353,12 +356,25 @@ async def api_batch_prepare(
                 for l in (body.project.labels or [])
                 if str(l.get("name") or "").strip()
             ]
+        conversation_transcript = ""
+        user_request = body.user_request
+        if body.session_id and not body.preselected_paths:
+            repo = AgentChatRepository(db, redis, settings)
+            turn = await build_turn_context(
+                repo,
+                body.session_id,
+                user_id=current_user.id,
+                current_user_content=body.user_request,
+                max_turns_in_window=settings.agent_default_max_turns_in_window,
+            )
+            conversation_transcript = turn.transcript
 
+        current_rel = (body.current_relative_path or "").strip()
         candidates = [c.model_dump() for c in body.candidates]
         result = await prepare_batch_annotation(
             llm,
-            user_request=body.user_request,
-            current_relative_path=body.current_relative_path,
+            user_request=user_request,
+            current_relative_path=current_rel,
             candidates=candidates,
             label_candidates=body.label_candidates,
             detection_models=body.detection_models,
@@ -367,10 +383,13 @@ async def api_batch_prepare(
             provider_is_vision=provider_is_vision,
             project_name=project_name,
             label_names=label_names,
+            conversation_transcript=conversation_transcript,
+            preselected_paths=body.preselected_paths or None,
         )
         payload = {
             "selected_paths": result.selected_paths,
             "scope_reason": result.scope_reason,
+            "resolved_user_request": user_request,
             **result.plan.model_dump(),
         }
         return {"data": payload}

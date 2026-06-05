@@ -25,6 +25,7 @@ class AgentMessage(Base):
         nullable=False,
     )
     role: Mapped[str] = mapped_column(String(16), nullable=False)
+    interaction_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
     sort_index: Mapped[int] = mapped_column(nullable=False, default=0)
     blocks_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="done")

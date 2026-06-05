@@ -126,6 +126,64 @@ async def test_session_messages_pagination(
 
 
 @pytest.mark.asyncio
+async def test_append_user_message_rejects_assistant_id_conflict(
+    client: AsyncClient,
+    db_session,
+    fake_redis,
+    unique_email: str,
+    test_password: str,
+) -> None:
+    from datetime import datetime, timezone
+
+    from app.core.config import get_settings
+    from app.models.agent_message import AgentMessage
+
+    await client.post(
+        "/api/v1/auth/register",
+        json={"email": unique_email, "password": test_password},
+    )
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": unique_email, "password": test_password},
+    )
+    me = await client.get(
+        "/api/v1/users/me",
+        headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+    )
+    user_id = uuid.UUID(me.json()["id"])
+
+    settings = get_settings()
+    repo = AgentChatRepository(db_session, fake_redis, settings)
+    session_id = "session-user-id-conflict"
+    await repo.create_session(user_id, session_id=session_id, title="conflict-test")
+    now = datetime.now(timezone.utc)
+    db_session.add(
+        AgentMessage(
+            id="msg-assistant",
+            session_id=session_id,
+            user_id=user_id,
+            role="assistant",
+            sort_index=0,
+            blocks_json=[],
+            status="streaming",
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    await db_session.flush()
+
+    with pytest.raises(ValueError, match="user_message_id_conflict"):
+        await repo._append_user_message(
+            user_id=user_id,
+            session_id=session_id,
+            message_id="msg-assistant",
+            content="第二轮用户问题",
+            provider_id="prov",
+            model="gpt",
+        )
+
+
+@pytest.mark.asyncio
 async def test_decode_session_cursor_invalid() -> None:
     from app.services.agent_session_cursor import decode_session_cursor
 

@@ -3,7 +3,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from app.core.config import Settings
 from app.schemas.agent import ChatContextConfigInput, ChatContextInput, ChatMessageInput, ChatStreamRequest
 
-CHAT_SYSTEM_PROMPT = """你正在 LR-Agent 桌面应用中与用户对话。LR-Agent 支持图像标注、预训练模型与项目文件等工作流。"""
+CHAT_SYSTEM_PROMPT = """在 LR-Agent 系统内回答用户问题。结合【你的身份】中的模型信息作答，勿自称独立产品助手或其它未配置的模型。"""
 
 ASSIST_SYSTEM_PROMPT = """你正在 LR-Agent 中协助用户，必要时可使用只读工具查询账户信息、应用说明与当前界面上下文（工作区路径、打开文件、标注项目等）。"""
 
@@ -44,6 +44,8 @@ def build_lc_messages(
     settings: Settings,
     *,
     system_prompt: str = CHAT_SYSTEM_PROMPT,
+    last_user_image_absolute_path: str | None = None,
+    attach_vision_to_last_user: bool = False,
 ) -> tuple[list, int, bool]:
     """Return (lc_messages, token_estimate, needs_summarize)."""
     cfg = _config(req, settings)
@@ -61,9 +63,26 @@ def build_lc_messages(
             SystemMessage(content=f"【此前对话摘要】\n{req.context.summary}"),
         )
 
-    for item in windowed:
+    from app.agent.chat_message_builder import build_multimodal_user_message
+
+    for idx, item in enumerate(windowed):
+        is_last = idx == len(windowed) - 1
         if item.role == "user":
-            lc_messages.append(HumanMessage(content=item.content))
+            if (
+                attach_vision_to_last_user
+                and is_last
+                and last_user_image_absolute_path
+            ):
+                lc_messages.append(
+                    build_multimodal_user_message(
+                        item.content,
+                        image_absolute_path=last_user_image_absolute_path,
+                        max_edge=settings.agent_chat_vision_max_edge,
+                        jpeg_quality=settings.agent_chat_vision_jpeg_quality,
+                    ),
+                )
+            else:
+                lc_messages.append(HumanMessage(content=item.content))
         elif item.role == "assistant":
             lc_messages.append(AIMessage(content=item.content))
         elif item.role == "system":

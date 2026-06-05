@@ -47,8 +47,8 @@ async def create_batch_plan(
     label_candidates: list[dict],
     detection_models: list[dict],
     image_count: int,
-    default_conf: float = 0.25,
-    default_iou: float = 0.45,
+    default_conf: float = 0.7,
+    default_iou: float = 0.5,
     provider_is_vision: bool = False,
 ) -> BatchPlanResult:
     messages = [

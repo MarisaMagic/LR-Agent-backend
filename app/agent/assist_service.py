@@ -1,13 +1,91 @@
 import json
+import uuid
 from collections.abc import AsyncIterator
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 
+from app.agent.assist_vision import (
+    can_bootstrap_vision,
+    pick_vision_relative_path,
+    stream_vision_tool_execution,
+    vision_relative_from_user_text,
+)
+from app.agent.chat_message_builder import build_multimodal_user_message
 from app.agent.stream_adapter import events_from_chunk
 from app.agent.tools.registry import tool_fn_map
-from app.schemas.agent import StreamEventPayload
+from app.agent.tools.workspace_file_reader import (
+    VISION_TOOL_NAME,
+    extract_vision_path_from_tool_result,
+    format_vision_tool_result_for_display,
+)
+from app.core.config import Settings
+from app.schemas.agent import ClientContextInput, StreamEventPayload
+from app.agent.turn_understanding_service import TurnUnderstandingResult
+
+
+def _normalize_tool_call(call: dict) -> tuple[str, str, dict]:
+    tool_id = str(call.get("id") or f"tool-{uuid.uuid4().hex[:12]}")
+    name = str(call.get("name") or "tool")
+    args = call.get("args") or {}
+    if not isinstance(args, dict):
+        try:
+            args = json.loads(args) if args else {}
+        except json.JSONDecodeError:
+            args = {}
+    return tool_id, name, args
+
+
+async def _stream_tool_execution(
+    *,
+    tool_id: str,
+    name: str,
+    args: dict,
+    fn_map: dict[str, object],
+    provider_is_vision: bool,
+    settings: Settings,
+    messages: list,
+) -> AsyncIterator[StreamEventPayload]:
+    yield StreamEventPayload(
+        type="tool_start",
+        tool_call_id=tool_id,
+        name=name,
+        arguments=json.dumps(args, ensure_ascii=False, indent=2),
+    )
+
+    fn = fn_map.get(name)
+    try:
+        if fn is None:
+            result_text = f"未知工具: {name}"
+        else:
+            result_text = str(fn(**args))
+    except Exception as exc:
+        result_text = f"工具执行失败: {exc}"
+
+    display_result = result_text
+    vision_path: str | None = None
+    if name == VISION_TOOL_NAME:
+        vision_path = extract_vision_path_from_tool_result(name, result_text)
+        if vision_path:
+            display_result = format_vision_tool_result_for_display(result_text)
+
+    yield StreamEventPayload(
+        type="tool_result",
+        tool_call_id=tool_id,
+        result=display_result,
+    )
+    messages.append(ToolMessage(content=display_result, tool_call_id=tool_id))
+
+    if vision_path and provider_is_vision:
+        messages.append(
+            build_multimodal_user_message(
+                "【附图】请根据上图回答用户关于该图片的问题。",
+                image_absolute_path=vision_path,
+                max_edge=settings.agent_chat_vision_max_edge,
+                jpeg_quality=settings.agent_chat_vision_jpeg_quality,
+            ),
+        )
 
 
 async def stream_assist(
@@ -15,27 +93,57 @@ async def stream_assist(
     lc_messages: list,
     tools: list[StructuredTool],
     *,
+    settings: Settings,
     max_tool_rounds: int,
     is_cancelled,
+    provider_is_vision: bool = False,
+    needs_vision_input: bool = False,
+    client_context: ClientContextInput | None = None,
+    understanding: TurnUnderstandingResult | None = None,
+    user_content: str = "",
 ) -> AsyncIterator[StreamEventPayload]:
     yield StreamEventPayload(type="preparing", stage="streaming")
     llm_with_tools = llm.bind_tools(tools)
     fn_map = tool_fn_map(tools)
     messages = list(lc_messages)
-    open_tool_ids: dict[str, str] = {}
+    vision_fn = fn_map.get(VISION_TOOL_NAME)
 
-    for _ in range(max_tool_rounds + 1):
+    wants_vision = needs_vision_input or bool(vision_relative_from_user_text(user_content))
+
+    vision_bootstrapped = False
+    if provider_is_vision and vision_fn is not None and wants_vision:
+        rel = pick_vision_relative_path(client_context, understanding)
+        if not rel and user_content.strip():
+            rel = vision_relative_from_user_text(user_content)
+        if can_bootstrap_vision(client_context, rel):
+            tool_id = f"lr-vision-bootstrap-{uuid.uuid4().hex[:10]}"
+            async for event in stream_vision_tool_execution(
+                tool_id=tool_id,
+                relative_path=rel,
+                vision_fn=vision_fn,  # type: ignore[arg-type]
+                provider_is_vision=provider_is_vision,
+                settings=settings,
+                messages=messages,
+            ):
+                yield event
+            vision_bootstrapped = True
+
+    for round_idx in range(max_tool_rounds + 1):
         if await is_cancelled():
             return
 
         gathered: AIMessage | None = None
+        pending_text: list[str] = []
+        pending_reasoning: list[str] = []
+
         async for chunk in llm_with_tools.astream(messages):
             if await is_cancelled():
                 return
-            for event in events_from_chunk(chunk):
-                if event.type == "tool_start" and event.tool_call_id:
-                    open_tool_ids[event.tool_call_id] = event.name or "tool"
-                yield event
+            for event in events_from_chunk(chunk, emit_tool_chunks=False):
+                if event.type == "text_delta" and event.content:
+                    pending_text.append(event.content)
+                elif event.type == "reasoning_delta" and event.content:
+                    pending_reasoning.append(event.content)
             if gathered is None:
                 gathered = chunk
             else:
@@ -45,43 +153,53 @@ async def stream_assist(
             break
 
         tool_calls = gathered.tool_calls or []
-        if not tool_calls:
-            break
 
-        messages.append(gathered)
-        for call in tool_calls:
-            if await is_cancelled():
-                return
-            tool_id = call.get("id") or "tool-unknown"
-            name = call.get("name") or "tool"
-            args = call.get("args") or {}
-            if not isinstance(args, dict):
-                try:
-                    args = json.loads(args) if args else {}
-                except json.JSONDecodeError:
-                    args = {}
+        if tool_calls:
+            messages.append(gathered)
+            for call in tool_calls:
+                if await is_cancelled():
+                    return
+                tool_id, name, args = _normalize_tool_call(call)
+                async for event in _stream_tool_execution(
+                    tool_id=tool_id,
+                    name=name,
+                    args=args,
+                    fn_map=fn_map,
+                    provider_is_vision=provider_is_vision,
+                    settings=settings,
+                    messages=messages,
+                ):
+                    yield event
+                if name == VISION_TOOL_NAME:
+                    vision_bootstrapped = True
+            continue
 
-            yield StreamEventPayload(
-                type="tool_start",
-                tool_call_id=tool_id,
-                name=name,
-                arguments=json.dumps(args, ensure_ascii=False, indent=2),
-            )
+        if (
+            round_idx == 0
+            and wants_vision
+            and provider_is_vision
+            and not vision_bootstrapped
+            and vision_fn is not None
+        ):
+            rel = pick_vision_relative_path(client_context, understanding)
+            if not rel and user_content.strip():
+                rel = vision_relative_from_user_text(user_content)
+            if can_bootstrap_vision(client_context, rel):
+                tool_id = f"lr-vision-fallback-{uuid.uuid4().hex[:10]}"
+                async for event in stream_vision_tool_execution(
+                    tool_id=tool_id,
+                    relative_path=rel,
+                    vision_fn=vision_fn,  # type: ignore[arg-type]
+                    provider_is_vision=provider_is_vision,
+                    settings=settings,
+                    messages=messages,
+                ):
+                    yield event
+                vision_bootstrapped = True
+                continue
 
-            fn = fn_map.get(name)
-            try:
-                if fn is None:
-                    result_text = f"未知工具: {name}"
-                else:
-                    result_text = str(fn(**args))
-            except Exception as exc:
-                result_text = f"工具执行失败: {exc}"
-
-            yield StreamEventPayload(
-                type="tool_result",
-                tool_call_id=tool_id,
-                result=result_text,
-            )
-            messages.append(
-                ToolMessage(content=result_text, tool_call_id=tool_id),
-            )
+        for part in pending_reasoning:
+            yield StreamEventPayload(type="reasoning_delta", content=part)
+        for part in pending_text:
+            yield StreamEventPayload(type="text_delta", content=part)
+        break

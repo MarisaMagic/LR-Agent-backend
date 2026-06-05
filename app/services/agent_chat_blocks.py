@@ -185,9 +185,11 @@ def apply_stream_event_to_blocks(
         }
         existing_idx = next((i for i, b in enumerate(next_blocks) if b.get("type") == "annotation_proposal"), -1)
         if existing_idx >= 0:
-            next_blocks[existing_idx] = proposal_block
-        else:
-            next_blocks.append(proposal_block)
+            existing_status = next_blocks[existing_idx].get("status")
+            if existing_status:
+                proposal_block["status"] = existing_status
+            next_blocks = [b for b in next_blocks if b.get("type") != "annotation_proposal"]
+        next_blocks.append(proposal_block)
         return next_blocks
 
     return next_blocks

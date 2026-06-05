@@ -6,7 +6,11 @@ from langchain_core.messages import AIMessageChunk
 from app.schemas.agent import StreamEventPayload
 
 
-def events_from_chunk(chunk: AIMessageChunk) -> list[StreamEventPayload]:
+def events_from_chunk(
+    chunk: AIMessageChunk,
+    *,
+    emit_tool_chunks: bool = True,
+) -> list[StreamEventPayload]:
     events: list[StreamEventPayload] = []
     content = chunk.content
     if isinstance(content, str) and content:
@@ -22,6 +26,9 @@ def events_from_chunk(chunk: AIMessageChunk) -> list[StreamEventPayload]:
     reasoning = additional.get("reasoning_content")
     if reasoning:
         events.append(StreamEventPayload(type="reasoning_delta", content=str(reasoning)))
+
+    if not emit_tool_chunks:
+        return events
 
     tool_chunks = chunk.tool_call_chunks or []
     for tool_chunk in tool_chunks:

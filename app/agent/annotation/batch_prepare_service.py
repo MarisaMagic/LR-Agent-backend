@@ -27,6 +27,7 @@ BATCH_PREPARE_SYSTEM = """你是批量图片 bbox 标注的准备助手（一次
 - 标签名为具体实例（球员名等）且与 YOLO 类名不一致时，use_vision_mapping=true（需视觉探针通过）
 - 用户说置信度/IoU/模型名时写入 detection_hints
 - 勿编造不在候选列表中的路径；无法确定时 selected_paths 为空并在 scope_reason 说明
+- 若提供对话上下文，selected_paths 必须与历史中用户明确范围一致（如「第一张」只能 1 条 path）
 
 只输出一个 JSON 对象：
 {
@@ -71,11 +72,13 @@ async def prepare_batch_annotation(
     candidates: list[dict],
     label_candidates: list[dict],
     detection_models: list[dict],
-    default_conf: float = 0.25,
-    default_iou: float = 0.45,
+    default_conf: float = 0.7,
+    default_iou: float = 0.5,
     provider_is_vision: bool = False,
     project_name: str | None = None,
     label_names: list[str] | None = None,
+    conversation_transcript: str = "",
+    preselected_paths: list[str] | None = None,
 ) -> BatchPrepareResult:
     if not candidates:
         empty_scope = AnnotationScopePayload()
@@ -109,10 +112,26 @@ async def prepare_batch_annotation(
     if label_names:
         labels_line = f"\n项目标签：{', '.join(label_names[:40])}\n"
 
+    locked_paths, _ = _filter_selected_paths(preselected_paths or [], candidates)
+    locked_block = ""
+    if locked_paths:
+        locked_block = (
+            f"\n【已确定图片范围（勿修改 selected_paths）】\n"
+            f"{json.dumps(locked_paths, ensure_ascii=False)}\n\n"
+        )
+
+    transcript_block = ""
+    if conversation_transcript.strip() and not locked_paths:
+        transcript_block = (
+            f"\n【对话上下文】\n{conversation_transcript.strip()}\n\n"
+        )
+
     messages = [
         SystemMessage(content=BATCH_PREPARE_SYSTEM),
         HumanMessage(
             content=(
+                f"{transcript_block}"
+                f"{locked_block}"
                 f"用户请求：{user_request}\n\n"
                 f"项目名称：{project_name or '未知'}\n"
                 f"当前打开文件：{current_relative_path or '（无）'}"
@@ -131,10 +150,14 @@ async def prepare_batch_annotation(
     content = resp.content if hasattr(resp, "content") else str(resp)
     data = extract_json_object(str(content))
 
-    selected, _ = _filter_selected_paths(data.get("selected_paths"), candidates)
-    scope_reason = str(data.get("scope_reason") or data.get("reason") or "").strip()
-    if not selected and not scope_reason:
-        scope_reason = "未从候选中解析到图片，请更具体说明文件夹或文件名"
+    if locked_paths:
+        selected = locked_paths
+        scope_reason = str(data.get("scope_reason") or "").strip() or "回合理解已确定图片范围"
+    else:
+        selected, _ = _filter_selected_paths(data.get("selected_paths"), candidates)
+        scope_reason = str(data.get("scope_reason") or data.get("reason") or "").strip()
+        if not selected and not scope_reason:
+            scope_reason = "未从候选中解析到图片，请更具体说明文件夹或文件名"
 
     base_scope = merge_annotation_scope(
         AnnotationScopePayload(),
