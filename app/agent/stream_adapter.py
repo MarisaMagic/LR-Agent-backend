@@ -1,6 +1,3 @@
-from collections.abc import AsyncIterator
-from typing import Any
-
 from langchain_core.messages import AIMessageChunk
 
 from app.schemas.agent import StreamEventPayload
@@ -49,12 +46,3 @@ def events_from_chunk(
         )
 
     return events
-
-
-async def stream_to_events(
-    async_stream: AsyncIterator[Any],
-) -> AsyncIterator[StreamEventPayload]:
-    async for chunk in async_stream:
-        if isinstance(chunk, AIMessageChunk):
-            for event in events_from_chunk(chunk):
-                yield event

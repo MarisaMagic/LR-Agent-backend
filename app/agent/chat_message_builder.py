@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import io
-from pathlib import Path
 
 from langchain_core.messages import HumanMessage
 from PIL import Image
@@ -71,9 +70,3 @@ def build_multimodal_user_message(
         {"type": "image_url", "image_url": {"url": data_url}},
     ]
     return HumanMessage(content=content)
-
-
-def image_absolute_path_for_relative(project_directory: str, relative_path: str) -> str:
-    root = Path(project_directory.strip())
-    rel = relative_path.replace("\\", "/").lstrip("/")
-    return str((root / rel).resolve())

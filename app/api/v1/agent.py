@@ -22,8 +22,7 @@ from app.schemas.agent import (
     AnnotationRunStartRequest,
     ChatCancelRequest,
     ChatStreamRequest,
-    TurnClassifyRequest,
-    TurnClassifyResponse,
+    TurnUnderstandRequest,
     TurnUnderstandResponse,
 )
 from app.services.llm_provider_service import LlmProviderService
@@ -192,90 +191,9 @@ async def delete_agent_session(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session_not_found")
 
 
-@router.post("/turn/classify", summary="回合意图分类（Ask / Agent 发送前）")
-async def turn_classify(
-    body: TurnClassifyRequest,
-    current_user: CurrentUser,
-    db: DbSession,
-    redis: RedisClient,
-    settings: SettingsDep,
-) -> dict[str, TurnClassifyResponse]:
-    await check_agent_session_write_limit(redis, settings, current_user.id)
-    provider_svc = LlmProviderService(db, settings)
-    try:
-        provider_uuid = uuid.UUID(body.provider_id)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="invalid_provider_id",
-        ) from exc
-
-    row = await provider_svc.get_for_user(provider_uuid, current_user.id)
-    if row is None or not row.enabled:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="llm_provider_not_found",
-        )
-
-    try:
-        provider_svc.validate_provider_base_url(row)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="invalid_base_url",
-        ) from exc
-
-    api_key = provider_svc.decrypt_api_key(row)
-    llm = build_chat_model(row, api_key, streaming=False, temperature=0.1)
-
-    conversation_transcript = ""
-    if body.session_id:
-        from app.agent.turn_context import build_turn_context
-        from app.services.agent_chat_repository import AgentChatRepository
-
-        repo = AgentChatRepository(db, redis, settings)
-        turn = await build_turn_context(
-            repo,
-            body.session_id,
-            user_id=current_user.id,
-            current_user_content=body.user_content,
-            up_to_message_id=body.truncate_from_message_id,
-            exclude_message_id=body.assistant_message_id,
-            max_turns_in_window=settings.agent_default_max_turns_in_window,
-        )
-        conversation_transcript = turn.transcript
-
-    try:
-        from app.agent.turn_understanding_service import understand_turn
-
-        provider_is_vision = await provider_svc.ensure_vision_probed(row)
-        understood = await understand_turn(
-            llm,
-            user_content=body.user_content,
-            client_context=body.client_context,
-            conversation_transcript=conversation_transcript,
-            provider_is_vision=provider_is_vision,
-        )
-        result = understood
-    except Exception as exc:
-        logger.exception("turn_classify failed user=%s", current_user.id)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="turn_classify_failed",
-        ) from exc
-
-    response = TurnClassifyResponse(
-        turn_kind=result.turn_kind,
-        confidence=result.confidence,
-        reason=result.reason,
-        user_visible_hint=result.user_visible_hint,
-    )
-    return {"data": response}
-
-
 @router.post("/turn/understand", summary="统一回合理解（指代消解 + 意图 + 路由）")
 async def turn_understand(
-    body: TurnClassifyRequest,
+    body: TurnUnderstandRequest,
     current_user: CurrentUser,
     db: DbSession,
     redis: RedisClient,
@@ -336,6 +254,7 @@ async def turn_understand(
             client_context=body.client_context,
             conversation_transcript=conversation_transcript,
             provider_is_vision=provider_is_vision,
+            image_catalog_hint=body.image_catalog_hint,
         )
     except Exception as exc:
         logger.exception("turn_understand failed user=%s", current_user.id)

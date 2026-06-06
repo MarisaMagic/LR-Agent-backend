@@ -1,4 +1,9 @@
-"""Read workspace text, documents, and images for agent tools."""
+"""工作区文件读取实现：文本/代码、文档（PDF/DOCX）、图片（视觉）。
+
+由 registry 注册为 LLM 工具；视觉相关辅助函数供 assist_service / assist_vision 使用：
+  - extract_vision_path_from_tool_result：从工具结果提取图片绝对路径
+  - format_vision_tool_result_for_display：隐藏内部路径标记后展示给用户
+"""
 
 from __future__ import annotations
 
@@ -12,8 +17,10 @@ from app.core.config import Settings
 from app.schemas.agent import ClientContextInput
 
 VISION_TOOL_NAME = "read_image_for_vision"
+# 工具结果 JSON 中的内部字段，assist_service 据此注入多模态消息
 VISION_PATH_MARKER = "__vision_image_path__"
 
+# 禁止用 read_workspace_file 读取的二进制/专用格式
 TEXT_BLOCKLIST_SUFFIXES = frozenset(
     {
         ".png",
@@ -55,6 +62,7 @@ def read_workspace_text_file(
     *,
     settings: Settings,
 ) -> str:
+    """读取 UTF-8 文本/代码文件，按配置截断字节数与行数。"""
     resolved, err = resolve_workspace_file(client_context, path)
     if resolved is None:
         return err
@@ -115,6 +123,7 @@ def read_image_for_vision_tool(
     *,
     provider_is_vision: bool,
 ) -> str:
+    """加载图片元信息并返回 JSON；assist_service 据此注入多模态用户消息。"""
     if not provider_is_vision:
         return (
             "当前大模型未通过视觉能力探针，无法分析图片内容。"
@@ -158,6 +167,7 @@ def read_document_file(
     *,
     settings: Settings,
 ) -> str:
+    """提取 PDF / DOCX 正文，按配置截断页数与字符数。"""
     resolved, err = resolve_workspace_file(client_context, path)
     if resolved is None:
         return err
@@ -214,6 +224,7 @@ def _extract_docx_text(path: Path) -> tuple[str, str]:
 
 
 def extract_vision_path_from_tool_result(tool_name: str, result_text: str) -> str | None:
+    """从 read_image_for_vision 工具结果中提取图片绝对路径。"""
     if tool_name != VISION_TOOL_NAME:
         return None
     try:
@@ -230,6 +241,7 @@ def extract_vision_path_from_tool_result(tool_name: str, result_text: str) -> st
 
 
 def format_vision_tool_result_for_display(result_text: str) -> str:
+    """格式化视觉工具结果供前端展示，移除内部路径标记。"""
     try:
         data = json.loads(result_text)
     except json.JSONDecodeError:

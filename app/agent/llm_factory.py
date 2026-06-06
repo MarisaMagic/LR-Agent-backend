@@ -10,6 +10,7 @@ def build_chat_model(
     streaming: bool = True,
     temperature: float = 0.7,
 ) -> ChatOpenAI:
+    """Build a chat model for the given provider and API key."""
     base_url = provider.base_url.rstrip("/")
     return ChatOpenAI(
         model=provider.model,

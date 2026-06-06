@@ -1,21 +1,30 @@
+"""对话上下文服务：将请求消息组装为 LangChain 消息链，并评估是否需要压缩摘要。
+
+职责：
+  - 裁剪对话窗口、拼接系统提示词与历史摘要
+  - 估算 token 用量，判断是否需要触发 summarize
+  - 为摘要压缩任务格式化对话文本
+"""
+
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.core.config import Settings
 from app.schemas.agent import ChatContextConfigInput, ChatContextInput, ChatMessageInput, ChatStreamRequest
 
+# 纯 chat 模式默认系统提示词（assist 模式由 context_snapshot 组装）
 CHAT_SYSTEM_PROMPT = """在 LR-Agent 系统内回答用户问题。结合【你的身份】中的模型信息作答，勿自称独立产品助手或其它未配置的模型。"""
-
-ASSIST_SYSTEM_PROMPT = """你正在 LR-Agent 中协助用户，必要时可使用只读工具查询账户信息、应用说明与当前界面上下文（工作区路径、打开文件、标注项目等）。"""
 
 SUMMARIZE_PROMPT = """请将以下对话历史压缩为简洁中文摘要，保留关键事实、用户目标与已达成结论。
 只输出摘要正文，不要加标题或前后缀。"""
 
 
 def estimate_tokens(text: str) -> int:
+    """按字符数粗估 token（len // 4），用于预算判断而非精确计费。"""
     return max(1, len(text) // 4)
 
 
 def _config(req: ChatStreamRequest, settings: Settings) -> ChatContextConfigInput:
+    """合并请求级与默认上下文配置（窗口大小、token 预算、摘要触发阈值等）。"""
     if req.context and req.context.config:
         return req.context.config
     return ChatContextConfigInput(
@@ -31,6 +40,7 @@ def window_messages(
     messages: list[ChatMessageInput],
     max_turns: int,
 ) -> list[ChatMessageInput]:
+    """按轮次裁剪消息列表，保留最近 max_turns 轮（每轮 user + assistant）。"""
     if max_turns <= 0:
         return messages
     max_messages = max_turns * 2
@@ -44,12 +54,12 @@ def build_lc_messages(
     settings: Settings,
     *,
     system_prompt: str = CHAT_SYSTEM_PROMPT,
-    last_user_image_absolute_path: str | None = None,
-    attach_vision_to_last_user: bool = False,
 ) -> tuple[list, int, bool]:
-    """Return (lc_messages, token_estimate, needs_summarize)."""
+    """构建 LangChain 消息链，返回 (lc_messages, token_estimate, needs_summarize)。"""
     cfg = _config(req, settings)
     msgs = list(req.messages)
+
+    # 确保当前用户输入已纳入消息列表（避免与最后一条 user 消息重复）
     if req.user_content.strip():
         last = msgs[-1] if msgs else None
         if not (last and last.role == "user" and last.content.strip() == req.user_content.strip()):
@@ -57,37 +67,22 @@ def build_lc_messages(
 
     windowed = window_messages(msgs, cfg.max_turns_in_window)
 
+    # 系统提示词 + 可选历史摘要
     lc_messages: list = [SystemMessage(content=system_prompt)]
     if req.context and req.context.summary:
         lc_messages.append(
             SystemMessage(content=f"【此前对话摘要】\n{req.context.summary}"),
         )
 
-    from app.agent.chat_message_builder import build_multimodal_user_message
-
-    for idx, item in enumerate(windowed):
-        is_last = idx == len(windowed) - 1
+    for item in windowed:
         if item.role == "user":
-            if (
-                attach_vision_to_last_user
-                and is_last
-                and last_user_image_absolute_path
-            ):
-                lc_messages.append(
-                    build_multimodal_user_message(
-                        item.content,
-                        image_absolute_path=last_user_image_absolute_path,
-                        max_edge=settings.agent_chat_vision_max_edge,
-                        jpeg_quality=settings.agent_chat_vision_jpeg_quality,
-                    ),
-                )
-            else:
-                lc_messages.append(HumanMessage(content=item.content))
+            lc_messages.append(HumanMessage(content=item.content))
         elif item.role == "assistant":
             lc_messages.append(AIMessage(content=item.content))
         elif item.role == "system":
             lc_messages.append(SystemMessage(content=item.content))
 
+    # 基于全量消息（非窗口裁剪后）估算 token，用于摘要触发判断
     token_estimate = sum(estimate_tokens(m.content) for m in msgs)
     if req.context and req.context.summary:
         token_estimate += estimate_tokens(req.context.summary)
@@ -104,6 +99,7 @@ def build_lc_messages(
 
 
 def messages_for_summary(messages: list[ChatMessageInput]) -> str:
+    """将消息列表格式化为「用户/助手」对话文本，供摘要 LLM 使用。"""
     lines: list[str] = []
     for item in messages:
         prefix = "用户" if item.role == "user" else "助手"

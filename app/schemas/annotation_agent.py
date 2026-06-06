@@ -22,22 +22,6 @@ class AnnotationLlmBaseRequest(BaseModel):
     provider_id: str = Field(min_length=1, max_length=64)
 
 
-class ClassifyIntentRequest(AnnotationLlmBaseRequest):
-    user_request: str = Field(min_length=1, max_length=20_000)
-    project: AnnotationProjectSnapshotInput | None = None
-    interaction_mode: str = Field(
-        default="annotation",
-        description="chat | annotation；annotation 路径仅解析任务，不再做批量门禁",
-    )
-
-
-class ParseScopeRequest(AnnotationLlmBaseRequest):
-    user_request: str = Field(min_length=1, max_length=20_000)
-    current_relative_path: str = ""
-    explicit_paths: list[str] = Field(default_factory=list)
-    candidates: list[ImageCandidateInput] = Field(default_factory=list)
-
-
 class BatchPrepareRequest(AnnotationLlmBaseRequest):
     """Single-shot scope + plan (replaces separate parse-task / parse-scope / create-plan in batch)."""
 
@@ -54,17 +38,6 @@ class BatchPrepareRequest(AnnotationLlmBaseRequest):
     default_conf_threshold: float = Field(default=0.7, ge=0.05, le=0.95)
     default_iou_threshold: float = Field(default=0.5, ge=0.05, le=0.95)
     project: AnnotationProjectSnapshotInput | None = None
-
-
-class CreatePlanRequest(AnnotationLlmBaseRequest):
-    user_request: str = Field(min_length=1, max_length=20_000)
-    intent_summary: str = ""
-    annotation_scope: dict[str, Any] = Field(default_factory=dict)
-    label_candidates: list[dict[str, Any]] = Field(default_factory=list)
-    detection_models: list[dict[str, Any]] = Field(default_factory=list)
-    image_count: int = Field(ge=0, le=500)
-    default_conf_threshold: float = Field(default=0.7, ge=0.05, le=0.95)
-    default_iou_threshold: float = Field(default=0.5, ge=0.05, le=0.95)
 
 
 class MapBoxesRequest(AnnotationLlmBaseRequest):

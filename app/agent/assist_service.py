@@ -1,3 +1,11 @@
+"""Assist 模式流式推理：在工具增强对话中执行多轮 LLM ↔ 工具循环。
+
+由 orchestrator 在 assist 路由下调用，流程概览：
+  1. 绑定只读工具 → 按需预加载视觉图片（bootstrap）
+  2. 多轮循环：LLM 流式推理 → 解析 tool_calls → 执行工具 → 回填 ToolMessage
+  3. 无工具调用时输出最终文本；首轮可触发视觉 fallback
+"""
+
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -26,6 +34,7 @@ from app.agent.turn_understanding_service import TurnUnderstandingResult
 
 
 def _normalize_tool_call(call: dict) -> tuple[str, str, dict]:
+    """将 LLM 返回的 tool_call 规范化为 (id, name, args)。"""
     tool_id = str(call.get("id") or f"tool-{uuid.uuid4().hex[:12]}")
     name = str(call.get("name") or "tool")
     args = call.get("args") or {}
@@ -47,6 +56,7 @@ async def _stream_tool_execution(
     settings: Settings,
     messages: list,
 ) -> AsyncIterator[StreamEventPayload]:
+    """执行单个工具，产出 tool_start / tool_result 事件，并将结果追加到消息列表。"""
     yield StreamEventPayload(
         type="tool_start",
         tool_call_id=tool_id,
@@ -77,6 +87,7 @@ async def _stream_tool_execution(
     )
     messages.append(ToolMessage(content=display_result, tool_call_id=tool_id))
 
+    # 视觉工具成功后，向消息链注入多模态用户消息供下一轮 LLM 看图
     if vision_path and provider_is_vision:
         messages.append(
             build_multimodal_user_message(
@@ -102,6 +113,7 @@ async def stream_assist(
     understanding: TurnUnderstandingResult | None = None,
     user_content: str = "",
 ) -> AsyncIterator[StreamEventPayload]:
+    """Assist 模式主入口：多轮工具调用循环，直至 LLM 产出最终回复或无剩余轮次。"""
     yield StreamEventPayload(type="preparing", stage="streaming")
     llm_with_tools = llm.bind_tools(tools)
     fn_map = tool_fn_map(tools)
@@ -110,6 +122,8 @@ async def stream_assist(
 
     wants_vision = needs_vision_input or bool(vision_relative_from_user_text(user_content))
 
+    # ── 阶段 1：视觉预加载（bootstrap）────────────────────────────────────
+    # 在首轮 LLM 调用前主动加载图片，避免模型未主动调用视觉工具
     vision_bootstrapped = False
     if provider_is_vision and vision_fn is not None and wants_vision:
         rel = pick_vision_relative_path(client_context, understanding)
@@ -128,6 +142,7 @@ async def stream_assist(
                 yield event
             vision_bootstrapped = True
 
+    # ── 阶段 2：多轮 LLM ↔ 工具循环 ─────────────────────────────────────
     for round_idx in range(max_tool_rounds + 1):
         if await is_cancelled():
             return
@@ -136,6 +151,7 @@ async def stream_assist(
         pending_text: list[str] = []
         pending_reasoning: list[str] = []
 
+        # 流式收集本轮 LLM 输出；工具调用阶段暂不向外推送文本增量
         async for chunk in llm_with_tools.astream(messages):
             if await is_cancelled():
                 return
@@ -155,6 +171,7 @@ async def stream_assist(
         tool_calls = gathered.tool_calls or []
 
         if tool_calls:
+            # LLM 请求工具：依次执行，结果回填后继续下一轮
             messages.append(gathered)
             for call in tool_calls:
                 if await is_cancelled():
@@ -174,6 +191,8 @@ async def stream_assist(
                     vision_bootstrapped = True
             continue
 
+        # ── 阶段 3：视觉 fallback ─────────────────────────────────────────
+        # 首轮无 tool_calls 但用户需要看图时，主动补一次视觉工具调用
         if (
             round_idx == 0
             and wants_vision
@@ -198,6 +217,7 @@ async def stream_assist(
                 vision_bootstrapped = True
                 continue
 
+        # ── 阶段 4：输出最终回复 ───────────────────────────────────────────
         for part in pending_reasoning:
             yield StreamEventPayload(type="reasoning_delta", content=part)
         for part in pending_text:

@@ -8,16 +8,12 @@ from fastapi.responses import StreamingResponse
 from openai import BadRequestError
 
 from app.agent.annotation import (
-    classify_annotation_intent,
-    create_batch_plan,
     prepare_batch_annotation,
     heuristic_map_boxes,
     map_detection_boxes,
     map_detection_boxes_to_labels_unified,
     map_detection_boxes_with_vision,
     map_single_box_crop_vision,
-    merge_annotation_scope,
-    parse_batch_scope_single_shot,
     run_agent_turn,
 )
 from app.agent.annotation.debug_log import log_annotation_agent
@@ -37,14 +33,11 @@ from app.services.agent_chat_repository import AgentChatRepository
 from app.schemas.annotation_agent import (
     AgentTurnRequest,
     BatchPrepareRequest,
-    ClassifyIntentRequest,
-    CreatePlanRequest,
     HeuristicMapRequest,
     MapBoxCropRequest,
     MapBoxesRequest,
     MapBoxesVisionRequest,
     MapDetectionBoxesRequest,
-    ParseScopeRequest,
     SubImageRunRequest,
     SubImageToolResultRequest,
 )
@@ -99,85 +92,6 @@ async def _llm_for_provider(
 
     api_key = svc.decrypt_api_key(row)
     return build_chat_model(row, api_key, streaming=False, temperature=temperature)
-
-
-@router.post("/classify-intent", summary="解析标注任务（Annotation 路径）")
-@router.post("/parse-task", summary="解析标注任务（Annotation 路径）")
-async def api_classify_intent(
-    body: ClassifyIntentRequest,
-    current_user: CurrentUser,
-    db: DbSession,
-    settings: SettingsDep,
-):
-    try:
-        llm = await _llm_for_provider(db, settings, current_user.id, body.provider_id)
-        project = body.project
-        label_names = None
-        project_name = None
-        if project is not None:
-            project_name = project.name or None
-            label_names = [
-                str(l.get("name") or "")
-                for l in (project.labels or [])
-                if str(l.get("name") or "").strip()
-            ]
-        result = await classify_annotation_intent(
-            llm,
-            user_request=body.user_request,
-            has_active_project=project is not None,
-            annotation_type=project.annotation_type if project else None,
-            modality=project.modality if project else None,
-            interaction_mode=body.interaction_mode,
-            label_names=label_names,
-            project_name=project_name,
-        )
-        merged_scope = merge_annotation_scope(
-            result.annotation_scope,
-            body.user_request,
-            label_names=label_names,
-        )
-        result.annotation_scope = merged_scope.to_payload()
-        log_annotation_agent(
-            "parse-task",
-            "任务解析完成",
-            provider_id=body.provider_id,
-            intent_summary=result.intent_summary,
-            annotation_scope=result.annotation_scope.model_dump(),
-            label_names=label_names,
-        )
-        return {"data": result.model_dump()}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise _http_from_llm_error(exc) from exc
-
-
-@router.post("/parse-scope", summary="单次 LLM 解析批量图片范围")
-async def api_parse_scope(
-    body: ParseScopeRequest,
-    current_user: CurrentUser,
-    db: DbSession,
-    settings: SettingsDep,
-):
-    try:
-        llm = await _llm_for_provider(db, settings, current_user.id, body.provider_id)
-        candidates = [c.model_dump() for c in body.candidates]
-        result = await parse_batch_scope_single_shot(
-            llm,
-            user_request=body.user_request,
-            current_relative_path=body.current_relative_path,
-            candidates=candidates,
-        )
-        return {
-            "data": {
-                **result.model_dump(),
-                "source": "single_shot",
-            }
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise _http_from_llm_error(exc) from exc
 
 
 @router.post("/map-heuristic", summary="启发式检测框映射（无 LLM）")
@@ -393,71 +307,6 @@ async def api_batch_prepare(
             **result.plan.model_dump(),
         }
         return {"data": payload}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise _http_from_llm_error(exc) from exc
-
-
-@router.post("/create-plan", summary="批量标注执行计划")
-async def api_create_plan(
-    body: CreatePlanRequest,
-    current_user: CurrentUser,
-    db: DbSession,
-    settings: SettingsDep,
-):
-    try:
-        llm = await _llm_for_provider(db, settings, current_user.id, body.provider_id)
-        svc = LlmProviderService(db, settings)
-        provider_uuid = uuid.UUID(body.provider_id)
-        row = await svc.get_for_user(provider_uuid, current_user.id)
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="llm_provider_not_found")
-        provider_is_vision = await svc.ensure_vision_probed(row)
-        scope = AnnotationScopePayload.model_validate(body.annotation_scope or {})
-        label_names = [
-            str(c.get("name") or "")
-            for c in (body.label_candidates or [])
-            if str(c.get("name") or "").strip()
-        ]
-        scope = merge_annotation_scope(
-            scope,
-            body.user_request,
-            label_names=label_names,
-        ).to_payload()
-        log_annotation_agent(
-            "create-plan-request",
-            "生成计划",
-            provider_id=body.provider_id,
-            provider_name=row.name,
-            provider_model=row.model,
-            provider_is_vision=provider_is_vision,
-            vision_probe_detail=row.vision_probe_detail,
-            image_count=body.image_count,
-            label_names=[str(c.get("name") or "") for c in (body.label_candidates or [])[:20]],
-        )
-        result = await create_batch_plan(
-            llm,
-            user_request=body.user_request,
-            intent_summary=body.intent_summary,
-            annotation_scope=scope,
-            label_candidates=body.label_candidates,
-            detection_models=body.detection_models,
-            image_count=body.image_count,
-            default_conf=body.default_conf_threshold,
-            default_iou=body.default_iou_threshold,
-            provider_is_vision=provider_is_vision,
-        )
-        log_annotation_agent(
-            "create-plan-result",
-            "计划已生成",
-            use_vision_mapping=result.use_vision_mapping,
-            label_strategy=result.label_strategy,
-            detection_hints=result.detection_hints.model_dump(),
-            annotation_scope=result.annotation_scope.model_dump(),
-            sub_agent_constraints=result.sub_agent_constraints.model_dump(),
-        )
-        return {"data": result.model_dump()}
     except HTTPException:
         raise
     except Exception as exc:

@@ -31,8 +31,8 @@ from app.services.agent_session_cursor import decode_session_cursor, encode_sess
 
 
 def normalize_message_interaction_mode(agent_mode: str | None) -> str:
-    """Persisted per-message mode: chat (Ask) or annotation (Agent)."""
-    if agent_mode in ("annotation", "annotate"):
+    """Persisted per-message mode: chat or annotation."""
+    if agent_mode == "annotation":
         return "annotation"
     return "chat"
 
@@ -619,11 +619,10 @@ class AgentChatRepository:
         if pid and not row.annotation_project_id:
             row.annotation_project_id = str(pid)
         mode = getattr(client_context, "agent_mode", None)
-        if mode in ("annotation", "annotate"):
+        if mode == "annotation":
             row.interaction_mode = "annotation"
-        elif mode in ("chat", "ask", None):
-            if mode == "chat":
-                row.interaction_mode = "chat"
+        elif mode == "chat":
+            row.interaction_mode = "chat"
 
     async def _message_ids_from_db(self, session_id: str) -> list[str]:
         result = await self.db.execute(

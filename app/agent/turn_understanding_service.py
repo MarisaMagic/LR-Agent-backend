@@ -1,4 +1,11 @@
-"""Unified per-turn understanding: LLM-only deixis, intent, and routing."""
+"""回合理解服务：单次 LLM 调用完成指代消解、意图识别与路由决策。
+
+由 orchestrator 在 assist 模式下调用（客户端未预计算时），也可通过 API 独立调用。
+理解结果流向：
+  1. format_understanding_for_system_prompt → 注入对话 Agent 系统提示词
+  2. assist_vision.pick_vision_relative_path → 视觉预加载路径选择
+  3. 客户端 turn_understanding 字段 → orchestrator 直接复用，跳过 LLM 调用
+"""
 
 from __future__ import annotations
 
@@ -16,40 +23,37 @@ from app.agent.context_helpers import (
 )
 from app.schemas.agent import ClientContextInput, TaskIntentLiteral, TurnKindLiteral
 
-UNDERSTAND_SYSTEM = """你是 LR-Agent 的回合理解与路由助手。根据对话历史、当前用户消息与界面状态，**一次**输出结构化 JSON。
+# 回合理解 LLM 的系统提示词（决策规则；字段结构由 TurnUnderstandingLlmResult 约束）
+UNDERSTAND_SYSTEM = """你是 LR-Agent 回合理解与路由模块。根据 human 消息中的对话历史、界面状态与当前用户输入，一次性输出 JSON（勿分步、勿输出 Markdown）。
 
-职责（单次完成，勿分步）：
-1. 指代消解：结合历史与 active_relative_path，解析「这两张/上面那些/漏了另一张/按前述」等为具体 relative_path
-2. 路由 turn_kind（由你全权决定，不受 UI 模式开关约束）：
-   - execute_batch：检测、标注、批量处理、补标、纠正遗漏图片等需要启动标注流水线的动作
-   - converse：问答、解释策略、查已有标注（可读 JSON）、寒暄、需看图描述的内容
-   - clarify_scope：与标注相关但图片范围仍不明确，需先追问用户
-   - unsupported：当前项目类型无法执行（极少）
-3. needs_vision_input：必须看像素才能回答（认人、数人等），且不是读取已有标注 JSON 可解决的；为 true 时对话 Agent 应调用 read_image_for_vision
+## 决策任务
 
-规则：
-- referenced_relative_paths：本轮要处理的**全部**图片相对路径，可多个
-- 用户说「这两张」且历史提到过 data/1.jpg 与 data/2.jpg → 两个路径都要列入
-- 用户反馈「漏了/还有一张/另一张呢」→ 结合历史补全缺失路径，通常 turn_kind=execute_batch
-- resolved_user_content：补全指代后的完整中文句，可独立理解
-- resolved_active_relative_path：UI/指代绑定的主图，无则 null
-- 不得虚构候选中不存在的路径
-- 回复中禁止出现 [Ask]、[Agent] 等模式前缀格式
+1. 指代消解
+   - 将省略/指代结合对话历史、active_relative_path、候选路径，解析为具体 relative_path。
+   - referenced_relative_paths：本轮涉及的全部图片路径（可多个）。
+   - resolved_active_relative_path：当前主图；无明确主图则为 null。
+   - 不得虚构历史中或候选列表中未出现过的路径。
 
-输出 JSON 字段：
-- resolved_user_content
-- referenced_relative_paths: string[]
-- resolved_active_relative_path: string | null
-- task_intent: converse|query_annotation|execute_batch|clarify_scope|unsupported
-- turn_kind: execute_batch|converse|clarify_scope|unsupported
-- needs_vision_input: bool
-- confidence: 0~1
-- scope_notes: 简短中文
-- reason: 简短中文
-- user_visible_hint: string | null（可选）"""
+2. 路由 turn_kind（不受 agent_mode 影响）
+   - execute_batch：需要启动标注流水线（检测、批量标注、补标、纠正遗漏等）。
+   - converse：问答、解释、查已有标注 JSON、寒暄、需看图描述。
+   - clarify_scope：与标注相关但图片范围仍不明确，需先追问。
+   - unsupported：当前项目类型无法执行（极少）。
+
+3. 视觉判定 needs_vision_input
+   - true：必须分析图像像素才能回答，且读取已有标注 JSON 无法解决。
+   - false：读标注文件/文本即可，或无需看图。
+
+## 输出要求
+
+- resolved_user_content：补全指代后的完整中文句，可独立理解。
+- task_intent 与 turn_kind 保持一致；查标注 JSON 用 query_annotation，其余与 turn_kind 对齐。
+- confidence：0~1；scope_notes / reason：简短中文说明依据。
+- user_visible_hint：仅当需向用户追问范围时填写，否则 null。"""
 
 
 class TurnUnderstandingLlmResult(BaseModel):
+    """LLM 结构化输出的原始解析模型。"""
     resolved_user_content: str = Field(min_length=1, max_length=20_000)
     referenced_relative_paths: list[str] = Field(default_factory=list)
     resolved_active_relative_path: str | None = None
@@ -63,6 +67,7 @@ class TurnUnderstandingLlmResult(BaseModel):
 
 
 class TurnUnderstandingResult(BaseModel):
+    """规范化后的回合理解结果，供 orchestrator / assist 下游消费。"""
     resolved_user_content: str
     referenced_relative_paths: list[str] = Field(default_factory=list)
     resolved_active_relative_path: str | None = None
@@ -81,6 +86,7 @@ _VALID_TURN_KINDS: frozenset[str] = frozenset(
 
 
 def _normalize_turn_kind(raw: str) -> TurnKindLiteral:
+    """兼容旧值 wants_batch，非法值回退为 converse。"""
     if raw == "wants_batch":
         return "execute_batch"
     if raw in _VALID_TURN_KINDS:
@@ -96,6 +102,7 @@ def _build_understand_human(
     provider_is_vision: bool,
     image_catalog_hint: list[str] | None,
 ) -> str:
+    """组装回合理解 LLM 的 human 消息：界面状态 + 对话历史 + 当前用户输入。"""
     transcript_block = conversation_transcript.strip() or "（无历史对话）"
     active_rel = client_active_relative(client_context) or "（无）"
     project_dir = project_directory(client_context) or "（无）"
@@ -124,6 +131,7 @@ def _build_understand_human(
 
 
 def _llm_to_result(parsed: TurnUnderstandingLlmResult) -> TurnUnderstandingResult:
+    """将 LLM 原始输出规范化为下游可用的 TurnUnderstandingResult。"""
     paths = [normalize_rel_path(p) for p in parsed.referenced_relative_paths if p.strip()]
     paths = list(dict.fromkeys(paths))
     active = parsed.resolved_active_relative_path
@@ -153,7 +161,7 @@ async def understand_turn(
     provider_is_vision: bool = False,
     image_catalog_hint: list[str] | None = None,
 ) -> TurnUnderstandingResult:
-    """Single LLM call: deixis resolution + intent + route."""
+    """单次 LLM 调用：指代消解 + 意图识别 + 路由决策。"""
     human = _build_understand_human(
         conversation_transcript=conversation_transcript,
         current_user_message=user_content,
@@ -170,6 +178,7 @@ async def understand_turn(
 
 
 def format_understanding_for_system_prompt(result: TurnUnderstandingResult) -> str:
+    """将理解结果格式化为【回合理解】块，追加到对话 Agent 系统提示词。"""
     paths = ", ".join(result.referenced_relative_paths) or "（无）"
     active = result.resolved_active_relative_path or "（无）"
     return (
@@ -181,7 +190,3 @@ def format_understanding_for_system_prompt(result: TurnUnderstandingResult) -> s
         f"- 需要看图描述：{'是，对话 Agent 应调用 read_image_for_vision（调用后系统会注入附图）' if result.needs_vision_input else '否'}\n"
         f"- 说明：{result.scope_notes or result.reason}"
     )
-
-
-# Re-export for orchestrator vision path resolution
-_project_directory = project_directory

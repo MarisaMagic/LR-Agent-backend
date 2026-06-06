@@ -1,3 +1,11 @@
+"""Assist 模式只读工具注册表。
+
+由 orchestrator 调用 build_tools_p1 构建工具列表，assist_service 通过 tool_fn_map 按名称执行。
+工具分两类：
+  - 上下文查询：账户、帮助、界面状态、标注项目快照
+  - 文件读取：文本/代码、文档、图片（视觉）、已有标注 JSON
+"""
+
 import json
 from collections.abc import Callable
 from typing import Any
@@ -5,6 +13,7 @@ from typing import Any
 from langchain_core.tools import StructuredTool
 
 from app.agent.annotation.annotation_doc_reader import read_file_annotation_doc
+from app.agent.context_helpers import project_directory
 from app.agent.context_snapshot import format_snapshot_for_prompt
 from app.agent.tools.help import get_lr_agent_help
 from app.agent.tools.workspace_file_reader import (
@@ -12,7 +21,6 @@ from app.agent.tools.workspace_file_reader import (
     read_image_for_vision_tool,
     read_workspace_text_file,
 )
-from app.agent.turn_understanding_service import _project_directory
 from app.core.config import Settings
 from app.models.user import User
 from app.schemas.agent import ClientContextInput
@@ -25,7 +33,7 @@ def build_tools_p1(
     settings: Settings,
     provider_is_vision: bool = False,
 ) -> list[StructuredTool]:
-
+    """构建 Phase 1 只读工具集，闭包绑定 user / client_context / settings。"""
     def account_summary() -> str:
         verified = "已验证" if user.email_verified else "未验证"
         name = user.display_name or user.username or "未设置"
@@ -66,7 +74,7 @@ def build_tools_p1(
         return get_lr_agent_help(topic)
 
     def read_file_annotation(relative_path: str) -> str:
-        project_dir = _project_directory(client_context)
+        project_dir = project_directory(client_context)
         if not project_dir:
             return "无法读取标注：未绑定项目目录。请确认已在标注任务中打开项目。"
         doc, err = read_file_annotation_doc(project_dir, relative_path)
@@ -91,6 +99,7 @@ def build_tools_p1(
     def read_document(relative_path: str = "") -> str:
         return read_document_file(client_context, relative_path, settings=settings)
 
+    # Phase 1 只读工具集
     return [
         StructuredTool.from_function(
             func=account_summary,
@@ -149,4 +158,5 @@ def build_tools_p1(
 
 
 def tool_fn_map(tools: list[StructuredTool]) -> dict[str, Callable[..., Any]]:
+    """将 StructuredTool 列表转为 name → func 映射，供 assist_service 本地执行。"""
     return {tool.name: tool.func for tool in tools if tool.func is not None}

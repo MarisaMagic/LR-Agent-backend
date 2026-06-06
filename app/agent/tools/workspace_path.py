@@ -1,4 +1,10 @@
-"""Resolve and validate workspace / project file paths for agent read tools."""
+"""工作区 / 项目文件路径解析与安全校验。
+
+所有文件读取工具（workspace_file_reader、assist_vision）的统一入口：
+  1. 确定允许访问的根目录（workspace_root + project_directory）
+  2. 解析用户/LLM 传入的路径，回退到当前打开文件
+  3. 校验路径在根目录内、禁止 .. 穿越
+"""
 
 from __future__ import annotations
 
@@ -9,10 +15,12 @@ from app.schemas.agent import ClientContextInput
 
 
 def normalize_relative_path(relative_path: str) -> str:
+    """将相对路径统一为正斜杠格式，去除空段与 `.`。"""
     return "/".join(part for part in relative_path.replace("\\", "/").split("/") if part and part != ".")
 
 
 def allowed_roots(client_context: ClientContextInput | None) -> list[Path]:
+    """返回可访问的根目录列表（工作区根 + 项目目录，去重）。"""
     roots: list[Path] = []
     seen: set[str] = set()
     if client_context is None:
@@ -36,6 +44,7 @@ def allowed_roots(client_context: ClientContextInput | None) -> list[Path]:
 
 
 def _is_under_root(candidate: Path, root: Path) -> bool:
+    """判断 candidate 是否在 root 目录树下。"""
     try:
         candidate.relative_to(root)
         return True
@@ -47,9 +56,11 @@ def resolve_workspace_file(
     client_context: ClientContextInput | None,
     path: str,
 ) -> tuple[Path | None, str]:
-    """
-    Resolve a user-supplied path to an absolute file under workspace_root or project_directory.
-    Empty path falls back to active_file_path / active_relative_path.
+    """解析并校验文件路径，返回 (绝对路径, 错误信息)。
+
+    - path 为空时回退到 active_file_path / active_relative_path
+    - 支持绝对路径（须在 allowed_roots 内）与相对路径
+    - 禁止 .. 目录穿越
     """
     raw = (path or "").strip()
     if not raw and client_context is not None:

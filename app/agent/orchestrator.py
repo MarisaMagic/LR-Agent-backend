@@ -1,3 +1,14 @@
+"""聊天 Agent 编排器：串联单次对话轮次的完整生命周期。
+
+编排流程概览：
+  1. 校验 LLM 提供商 → 注册客户端任务 → 构建模型实例
+  2. 同步上下文、准备本轮消息 → 构建轮次上下文窗口
+  3. 探测视觉能力 → 组装系统提示词 → 轮次理解（可选）
+  4. 构建 LangChain 消息 → 按需压缩历史摘要
+  5. 路由到 assist（工具调用）或 chat（纯对话）并流式输出
+  6. 持久化流事件 → 落库助手消息终态
+"""
+
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -30,6 +41,8 @@ logger = logging.getLogger(__name__)
 
 
 class ChatOrchestrator:
+    """单次聊天请求的编排入口，协调仓储、上下文、理解与流式推理。"""
+
     def __init__(
         self,
         db: AsyncSession,
@@ -47,8 +60,11 @@ class ChatOrchestrator:
         user: User,
         req: ChatStreamRequest,
     ) -> AsyncIterator[StreamEventPayload]:
+        """执行一轮对话，以 SSE 事件流形式逐步产出 preparing / delta / done 等事件。"""
         user_id_str = str(user.id)
         provider_svc = LlmProviderService(self.db, self.settings)
+
+        # ── 阶段 1：校验 LLM 提供商 ──────────────────────────────────────
         try:
             provider_uuid = uuid.UUID(req.provider_id)
         except ValueError:
@@ -66,6 +82,7 @@ class ChatOrchestrator:
             yield StreamEventPayload(type="error", message="invalid_base_url")
             return
 
+        # ── 阶段 2：注册任务、构建模型 ────────────────────────────────────
         await self.jobs.register_job(user_id_str, req.client_job_id)
 
         api_key = provider_svc.decrypt_api_key(row)
@@ -74,6 +91,7 @@ class ChatOrchestrator:
         cancelled = lambda: self.jobs.is_cancelled(user_id_str, req.client_job_id)
         assistant_id = req.assistant_message_id
 
+        # ── 阶段 3：同步上下文、准备本轮消息 ──────────────────────────────
         await self.repo.sync_context_from_request(user.id, req)
 
         try:
@@ -92,6 +110,7 @@ class ChatOrchestrator:
             yield StreamEventPayload(type="error", message="prepare_turn_failed")
             return
 
+        # 裁剪对话窗口，排除尚未完成的助手占位消息
         turn_ctx = build_turn_context_from_messages(
             chat_inputs,
             current_user_content=req.user_content,
@@ -112,6 +131,7 @@ class ChatOrchestrator:
 
         yield StreamEventPayload(type="preparing", stage="build_messages")
 
+        # ── 阶段 4：判定运行模式（assist / chat）──────────────────────────
         client_ctx = req.client_context
         has_project_snapshot = bool(
             client_ctx and client_ctx.annotation_project_snapshot is not None
@@ -119,8 +139,10 @@ class ChatOrchestrator:
         has_workspace = bool(
             client_ctx and (client_ctx.workspace_root or "").strip()
         )
+        # 存在标注项目或工作区时启用 assist 模式（只读工具）
         has_assist_tools = has_project_snapshot or has_workspace
 
+        # 探测模型是否支持视觉输入，供后续提示词与工具路由使用
         provider_is_vision = False
         if not await cancelled():
             try:
@@ -148,8 +170,10 @@ class ChatOrchestrator:
         else:
             system_prompt = f"{identity}\n\n{CHAT_SYSTEM_PROMPT}"
 
+        # ── 阶段 5：轮次理解（解析意图、引用路径等）──────────────────────
         understanding: TurnUnderstandingResult | None = None
         if client_ctx and client_ctx.turn_understanding is not None:
+            # 客户端已预计算理解结果，直接复用
             tu = client_ctx.turn_understanding
             understanding = TurnUnderstandingResult(
                 resolved_user_content=tu.resolved_user_content or req.user_content,
@@ -164,6 +188,7 @@ class ChatOrchestrator:
                 user_visible_hint=tu.user_visible_hint,
             )
         elif has_assist_tools and not await cancelled():
+            # assist 模式下由服务端 LLM 补充理解
             try:
                 understanding = await understand_turn(
                     llm,
@@ -184,6 +209,7 @@ class ChatOrchestrator:
                 f"{system_prompt}\n\n{format_understanding_for_system_prompt(understanding)}"
             )
 
+        # ── 阶段 6：构建 LangChain 消息，评估是否需要压缩 ─────────────────
         lc_messages, token_estimate, needs_summarize = build_lc_messages(
             req,
             self.settings,
@@ -194,6 +220,7 @@ class ChatOrchestrator:
         error_message: str | None = None
 
         try:
+            # 上下文超长时先压缩历史，再重新构建消息
             if needs_summarize and not await cancelled():
                 yield StreamEventPayload(type="preparing", stage="summarize")
                 summary = await chat_service.summarize_messages(llm, req.messages)
@@ -232,6 +259,7 @@ class ChatOrchestrator:
                     domain="annotation" if has_project_snapshot else "general",
                 )
 
+            # ── 阶段 7：路由并流式推理 ──────────────────────────────────────
             if has_assist_tools:
                 tools = build_tools_p1(
                     user,
@@ -274,6 +302,7 @@ class ChatOrchestrator:
             logger.exception("chat stream failed session=%s user=%s", req.session_id, user.id)
             yield StreamEventPayload(type="error", message=error_message)
         finally:
+            # ── 阶段 8：落库助手消息终态 ────────────────────────────────────
             if await cancelled() and final_status == "done":
                 final_status = "stopped"
             await self.repo.finalize_assistant_message(
@@ -296,6 +325,7 @@ class ChatOrchestrator:
         *,
         is_cancelled,
     ) -> AsyncIterator[StreamEventPayload]:
+        """透传流事件，同时将文本/推理/工具事件增量写入仓储。"""
         async for event in source:
             if await is_cancelled():
                 return

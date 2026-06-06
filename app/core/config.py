@@ -54,7 +54,6 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:1212"]
 
-    agent_router_enabled: bool = True
     agent_max_tool_rounds: int = 4
     agent_job_cancel_ttl_seconds: int = 3600
     agent_default_max_context_tokens: int = 12_000

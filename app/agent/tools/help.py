@@ -1,3 +1,5 @@
+"""LR-Agent 应用功能说明，供 get_lr_agent_help 工具返回。"""
+
 LR_AGENT_HELP = """# LR-Agent 功能概览
 
 - **资源管理器**：浏览本地文件夹与文件
@@ -12,6 +14,7 @@ LR_AGENT_HELP = """# LR-Agent 功能概览
 
 
 def get_lr_agent_help(topic: str | None = None) -> str:
+    """按 topic 关键词返回功能说明；无 topic 时返回完整概览。"""
     if not topic or not topic.strip():
         return LR_AGENT_HELP
     needle = topic.strip().lower()

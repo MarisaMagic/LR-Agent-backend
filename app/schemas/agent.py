@@ -75,28 +75,20 @@ class ClientContextInput(BaseModel):
     active_annotation_project_id: str | None = None
     annotation_project_modality: str | None = None
     annotation_project_type: str | None = None
-    agent_mode: Literal["chat", "annotation", "ask", "annotate"] | None = None
-    turn_kind: TurnKindLiteral | None = None
+    agent_mode: Literal["chat", "annotation"] | None = None
     annotation_project_snapshot: AnnotationProjectSnapshotInput | None = None
     turn_understanding: TurnUnderstandingResultSchema | None = None
 
 
-class TurnClassifyRequest(BaseModel):
+class TurnUnderstandRequest(BaseModel):
     provider_id: str = Field(min_length=1, max_length=64)
     user_content: str = Field(min_length=1, max_length=20_000)
-    interaction_mode: Literal["chat", "annotation"] = "annotation"
     session_id: str | None = Field(default=None, max_length=64)
     user_message_id: str | None = Field(default=None, max_length=64)
     assistant_message_id: str | None = Field(default=None, max_length=64)
     truncate_from_message_id: str | None = Field(default=None, max_length=64)
+    image_catalog_hint: list[str] | None = None
     client_context: ClientContextInput | None = None
-
-
-class TurnClassifyResponse(BaseModel):
-    turn_kind: TurnKindLiteral
-    confidence: float = Field(ge=0.0, le=1.0)
-    reason: str = ""
-    user_visible_hint: str | None = None
 
 
 class TurnUnderstandResponse(BaseModel):
@@ -243,7 +235,6 @@ class StreamEventPayload(BaseModel):
     domain: str | None = None
     target: str | None = None
     reason: str | None = None
-    pending_user_content: str | None = None
 
     @classmethod
     def from_client_dict(cls, data: dict[str, Any]) -> "StreamEventPayload":
@@ -266,8 +257,6 @@ class StreamEventPayload(BaseModel):
             domain=data.get("domain"),
             target=data.get("target"),
             reason=data.get("reason"),
-            pending_user_content=data.get("pendingUserContent")
-            or data.get("pending_user_content"),
         )
 
     def to_sse_dict(self) -> dict[str, Any]:
@@ -306,6 +295,4 @@ class StreamEventPayload(BaseModel):
             data["target"] = self.target
         if self.reason is not None:
             data["reason"] = self.reason
-        if self.pending_user_content is not None:
-            data["pendingUserContent"] = self.pending_user_content
         return data

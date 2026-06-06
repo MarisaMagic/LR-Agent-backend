@@ -1,18 +1,27 @@
-"""Format annotation project snapshot for assistant system prompts."""
+"""Assist 模式系统提示词组装：运行时身份、任务指令与客户端上下文快照。
+
+由 orchestrator 在 assist 路由下调用，组装顺序：
+  1. 运行时身份块（模型 ID、视觉能力探针结果）
+  2. 任务指令模板（工具纪律、视觉规则、文件读取指引）
+  3. 可选上下文（标注项目快照 / 工作区路径 / 当前打开文件）
+"""
 
 from __future__ import annotations
 
 from app.schemas.agent import AnnotationProjectSnapshotInput, ClientContextInput
 
+# 工具调用行为规范：禁止口述「准备调工具」，直接发起 tool call
 TOOL_DISCIPLINE = """【工具与回复顺序】
 - 需要工具时：直接发起 tool call，禁止先输出「请稍等」「我将调用…」等口述；最终答案在工具完成（及可能的附图注入）之后输出。
 - 用户只会看到：工具块（可折叠）→ 你的正文回答；不要把「准备调工具」当作最终回复。"""
 
+# 视觉与标注工具的选择规则
 VISION_RULES = """【图片与标注】
 - 用户问图中视觉内容（人数、物体、场景、文字 OCR、外观、「是谁」且需看像素等）：使用 `read_image_for_vision`；成功后系统注入附图，再根据图像回答。不要用 `read_file_annotation` 代替。
 - 仅当用户明确问「标注 JSON/文件里标了谁、有哪些框」时：使用 `read_file_annotation`。
 - `read_image_for_vision` 的 relative_path 为空时使用当前打开的图片；用户给出如 data/1.jpg 时传入该相对路径。"""
 
+# 仅有工作区、无标注项目时的任务模板
 WORKSPACE_ASSIST_TASK = """【任务】在 LR-Agent 系统内回答用户问题、按工具结果执行读文件等操作。
 """ + TOOL_DISCIPLINE + """
 - 文本/代码： `read_workspace_file`
@@ -23,6 +32,7 @@ WORKSPACE_ASSIST_TASK = """【任务】在 LR-Agent 系统内回答用户问题�
 
 可使用工具查询账户、应用说明与界面上下文。"""
 
+# 已打开标注项目时的任务模板（含批量检测路由约束）
 ASSISTANT_TASK_BASE = """【任务】在 LR-Agent 系统内回答用户问题、按工具与路由执行相关操作；当前已打开标注项目。
 """ + TOOL_DISCIPLINE + """
 - 标注策略、标签含义、项目结构：结合项目快照与工具回答
@@ -40,7 +50,7 @@ def format_runtime_identity_block(
     provider_label: str = "",
     supports_vision: bool = False,
 ) -> str:
-    """Who the model is (API model id) and what vision capability was probed."""
+    """生成【你的身份】块：告知模型自身 ID、视觉能力探针结果与系统边界。"""
     label = provider_label.strip() or "（未命名提供商）"
     if supports_vision:
         vision_line = "视觉能力：已通过 API 探针，可调用 read_image_for_vision 并在调用后查看附图。"
@@ -58,6 +68,7 @@ def format_runtime_identity_block(
 
 
 def format_snapshot_for_prompt(snapshot: AnnotationProjectSnapshotInput) -> str:
+    """将标注项目快照格式化为提示词可读文本（标签、检测模型等）。"""
     labels = snapshot.labels or []
     label_lines = [
         f"- {item.get('id', '')}: {item.get('name', '')}"
@@ -86,6 +97,7 @@ def format_snapshot_for_prompt(snapshot: AnnotationProjectSnapshotInput) -> str:
 
 
 def build_workspace_assistant_system_prompt(client_context: ClientContextInput | None) -> str:
+    """工作区 assist 提示词：任务模板 + 工作区根目录与当前打开文件。"""
     if client_context is None:
         return WORKSPACE_ASSIST_TASK
     parts = [WORKSPACE_ASSIST_TASK]
@@ -97,6 +109,7 @@ def build_workspace_assistant_system_prompt(client_context: ClientContextInput |
 
 
 def build_project_assistant_system_prompt(client_context: ClientContextInput | None) -> str:
+    """标注项目 assist 提示词：任务模板 + 项目快照。"""
     if client_context is None or client_context.annotation_project_snapshot is None:
         return ASSISTANT_TASK_BASE
     snap = client_context.annotation_project_snapshot
@@ -113,7 +126,7 @@ def build_assist_system_prompt(
     provider_label: str = "",
     supports_vision: bool = False,
 ) -> str:
-    """Full assist system prompt: runtime identity + task + optional project/workspace context."""
+    """组装完整 assist 系统提示词：身份块 + 按上下文选择任务模板。"""
     identity = format_runtime_identity_block(
         model=model,
         provider_label=provider_label,
@@ -126,38 +139,3 @@ def build_assist_system_prompt(
     else:
         task = WORKSPACE_ASSIST_TASK
     return f"{identity}\n\n{task}"
-
-
-# Backward-compatible aliases
-def build_ask_system_prompt(
-    client_context: ClientContextInput | None,
-    *,
-    model: str = "",
-    provider_label: str = "",
-    supports_vision: bool = False,
-) -> str:
-    if model:
-        return build_assist_system_prompt(
-            client_context,
-            model=model,
-            provider_label=provider_label,
-            supports_vision=supports_vision,
-        )
-    if client_context and client_context.annotation_project_snapshot is not None:
-        return build_project_assistant_system_prompt(client_context)
-    return build_workspace_assistant_system_prompt(client_context)
-
-
-def build_agent_converse_system_prompt(
-    client_context: ClientContextInput | None,
-    *,
-    model: str = "",
-    provider_label: str = "",
-    supports_vision: bool = False,
-) -> str:
-    return build_ask_system_prompt(
-        client_context,
-        model=model,
-        provider_label=provider_label,
-        supports_vision=supports_vision,
-    )

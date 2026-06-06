@@ -8,15 +8,14 @@ from app.schemas.agent import ChatMessageInput
 
 
 def test_normalize_interaction_mode():
-    assert normalize_interaction_mode("ask") == "chat"
     assert normalize_interaction_mode("chat") == "chat"
     assert normalize_interaction_mode("annotation") == "annotation"
-    assert normalize_interaction_mode("annotate") == "annotation"
+    assert normalize_interaction_mode(None) == "chat"
 
 
 def test_format_turn_line_plain():
-    assert format_turn_line(role="user", content="hi", interaction_mode="chat") == "用户: hi"
-    assert format_turn_line(role="assistant", content="ok", interaction_mode="annotation") == "助手: ok"
+    assert format_turn_line(role="user", content="hi") == "用户: hi"
+    assert format_turn_line(role="assistant", content="ok") == "助手: ok"
 
 
 def test_build_turn_context_window_and_transcript():
