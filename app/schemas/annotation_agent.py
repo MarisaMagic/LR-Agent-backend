@@ -28,7 +28,7 @@ class BatchPrepareRequest(AnnotationLlmBaseRequest):
     user_request: str = Field(min_length=1, max_length=20_000)
     preselected_paths: list[str] = Field(
         default_factory=list,
-        description="回合理解确定的图片路径；非空则跳过选图，仅生成执行计划",
+        description="客户端显式指定的图片路径（如 UI 勾选）；非空则跳过 LLM 选图，仅生成执行计划",
     )
     session_id: str | None = Field(default=None, max_length=64)
     current_relative_path: str = ""

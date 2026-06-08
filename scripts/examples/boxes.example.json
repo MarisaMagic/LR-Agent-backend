@@ -1,0 +1,11 @@
+[
+  {
+    "box_index": 0,
+    "x": 0.12,
+    "y": 0.08,
+    "width": 0.18,
+    "height": 0.42,
+    "class_name": "person",
+    "confidence": 0.91
+  }
+]

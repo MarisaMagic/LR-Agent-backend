@@ -7,6 +7,7 @@ Electron 客户端与后端 API 同机部署时优先读 image_absolute_path；
 from __future__ import annotations
 
 import base64
+import io
 from pathlib import Path
 
 
@@ -34,3 +35,49 @@ def load_image_bytes(
         return base64.b64decode(raw), "base64"
     except Exception:
         return None, "none"
+
+
+def resize_image_to_jpeg_bytes(
+    raw: bytes,
+    *,
+    max_edge: int,
+    jpeg_quality: int,
+) -> tuple[bytes, str]:
+    """等比缩放并编码为 JPEG，返回 (jpeg_bytes, mime)。"""
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(raw))
+    if image.mode not in ("RGB",):
+        if image.mode in ("RGBA", "LA", "P"):
+            background = Image.new("RGB", image.size, (255, 255, 255))
+            if image.mode == "P":
+                image = image.convert("RGBA")
+            background.paste(
+                image,
+                mask=image.split()[-1] if image.mode == "RGBA" else None,
+            )
+            image = background
+        else:
+            image = image.convert("RGB")
+    w, h = image.size
+    scale = min(1.0, max_edge / max(w, h))
+    if scale < 1.0:
+        image = image.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=jpeg_quality, optimize=True)
+    return buffer.getvalue(), "image/jpeg"
+
+
+def image_bytes_to_data_url(
+    raw: bytes,
+    *,
+    max_edge: int,
+    jpeg_quality: int,
+) -> str:
+    jpeg_bytes, mime = resize_image_to_jpeg_bytes(
+        raw,
+        max_edge=max_edge,
+        jpeg_quality=jpeg_quality,
+    )
+    b64 = base64.b64encode(jpeg_bytes).decode("ascii")
+    return f"data:{mime};base64,{b64}"

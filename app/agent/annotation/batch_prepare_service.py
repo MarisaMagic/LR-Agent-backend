@@ -37,7 +37,13 @@ BATCH_PREPARE_SYSTEM = """你是批量图片 bbox 标注的准备助手（一次
 - 标签名为具体实例（球员名等）且与 YOLO 类名不一致时，use_vision_mapping=true（需视觉探针通过）
 - 用户说置信度/IoU/模型名时写入 detection_hints
 - 勿编造不在候选列表中的路径；无法确定时 selected_paths 为空并在 scope_reason 说明
-- 若提供对话上下文，selected_paths 必须与历史中用户明确范围一致（如「第一张」只能 1 条 path）
+
+选图规则（selected_paths 由你根据本轮用户请求决定，每轮重新分析）：
+- 以【用户请求】为最高优先级；用户纠正或扩大范围时，覆盖对话历史中的旧范围
+- 用户指定文件夹/目录（如「data 下所有图片」）时，从候选列表按 parent 字段选出该目录下全部图片
+- 用户指定单张或若干具体文件时，只选对应 path；指代消解可参考【对话上下文】（如「第一张」「按上面说的」）
+- 「当前打开文件」仅作参考；用户未限定为单张时，不要仅因当前打开图而只选一张
+- scope_reason 必须与 selected_paths 的实际数量和内容一致
 
 只输出一个 JSON 对象：
 {
@@ -124,17 +130,17 @@ async def prepare_batch_annotation(
     if label_names:
         labels_line = f"\n项目标签：{', '.join(label_names[:40])}\n"
 
-    # 回合理解已确定范围时，锁定 selected_paths 不让 LLM 修改
+    # 仅当客户端显式传入 preselected_paths（如 UI 勾选）时锁定选图，不由回合理解注入
     locked_paths, _ = _filter_selected_paths(preselected_paths or [], candidates)
     locked_block = ""
     if locked_paths:
         locked_block = (
-            f"\n【已确定图片范围（勿修改 selected_paths）】\n"
+            f"\n【客户端已指定图片范围（勿修改 selected_paths）】\n"
             f"{json.dumps(locked_paths, ensure_ascii=False)}\n\n"
         )
 
     transcript_block = ""
-    if conversation_transcript.strip() and not locked_paths:
+    if conversation_transcript.strip():
         transcript_block = (
             f"\n【对话上下文】\n{conversation_transcript.strip()}\n\n"
         )
@@ -165,7 +171,7 @@ async def prepare_batch_annotation(
 
     if locked_paths:
         selected = locked_paths
-        scope_reason = str(data.get("scope_reason") or "").strip() or "回合理解已确定图片范围"
+        scope_reason = str(data.get("scope_reason") or "").strip() or "客户端已指定图片范围"
     else:
         selected, _ = _filter_selected_paths(data.get("selected_paths"), candidates)
         scope_reason = str(data.get("scope_reason") or data.get("reason") or "").strip()

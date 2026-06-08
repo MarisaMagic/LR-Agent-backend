@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     annotation_sub_agent_max_iterations: int = 12
     annotation_sub_agent_max_rounds: int = 10
     annotation_vision_map_concurrency: int = 3
+    annotation_llm_temperature: float = 0.0
+    annotation_prepare_temperature: float = 0.1
+    annotation_vision_map_validate: bool = True
+    annotation_vision_map_max_retries: int = 2
+    annotation_label_pool_preflight: Literal["off", "auto", "always"] = "auto"
+    annotation_label_pool_preflight_min_extra: int = 2
     agent_chat_vision_max_edge: int = 1280
     agent_chat_vision_jpeg_quality: int = 85
     agent_read_file_max_bytes: int = 524_288

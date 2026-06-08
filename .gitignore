@@ -25,3 +25,8 @@ htmlcov/
 
 # Docker local overrides (keep .env.example)
 docker/.env
+
+# Vision map diagnostic script output & local test inputs
+diag_output/
+scripts/diag_output/
+scripts/examples/*.local.json

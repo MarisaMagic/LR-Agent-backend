@@ -53,7 +53,7 @@ async def _llm_for_provider(
     user_id: uuid.UUID,
     provider_id: str,
     *,
-    temperature: float = 0.1,
+    temperature: float = 0.0,
 ):
     svc = LlmProviderService(db, settings)
     try:
@@ -97,7 +97,13 @@ async def api_batch_prepare(
     settings: SettingsDep,
 ):
     try:
-        llm = await _llm_for_provider(db, settings, current_user.id, body.provider_id)
+        llm = await _llm_for_provider(
+            db,
+            settings,
+            current_user.id,
+            body.provider_id,
+            temperature=settings.annotation_prepare_temperature,
+        )
         svc = LlmProviderService(db, settings)
         provider_uuid = uuid.UUID(body.provider_id)
         row = await svc.get_for_user(provider_uuid, current_user.id)
@@ -174,7 +180,13 @@ async def api_map_detection_boxes(
         use_vision = use_vision_requested and provider_is_vision
         llm = None
         if use_vision:
-            llm = await _llm_for_provider(db, settings, current_user.id, body.provider_id)
+            llm = await _llm_for_provider(
+                db,
+                settings,
+                current_user.id,
+                body.provider_id,
+                temperature=settings.annotation_llm_temperature,
+            )
         log_annotation_agent(
             "map-api",
             "map-detection-boxes 请求",
@@ -219,6 +231,7 @@ async def api_map_detection_boxes(
             mapped=len(result.get("mappings") or [])
             - len(result.get("unmapped_indices") or []),
             unmapped=len(result.get("unmapped_indices") or []),
+            label_pool_source=result.get("label_pool_source"),
             hint=result.get("hint"),
         )
         return {"data": result}
