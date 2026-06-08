@@ -1,39 +1,25 @@
-import json
 import logging
 import uuid
-from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import StreamingResponse
 from openai import BadRequestError
 
 from app.agent.annotation import (
     prepare_batch_annotation,
     heuristic_map_boxes,
     map_detection_boxes_to_labels_unified,
-    run_agent_turn,
 )
 from app.agent.annotation.debug_log import log_annotation_agent
 from app.agent.annotation.image_bytes_loader import load_image_bytes
-from app.agent.annotation.agent_turn_service import MessageItem, ToolCallOut
 from app.agent.annotation.schemas import AnnotationScopePayload
-from app.agent.annotation.sub_image_run_service import (
-    stream_sub_image_run,
-    submit_client_tool_result,
-)
-from app.agent.annotation.sub_image_run_session import create_session
 from app.agent.llm_factory import build_chat_model
-from app.core.config import Settings
 from app.agent.turn_context import build_turn_context
 from app.core.deps import CurrentUser, DbSession, RedisClient, SettingsDep
 from app.services.agent_chat_repository import AgentChatRepository
 from app.schemas.annotation_agent import (
-    AgentTurnRequest,
     BatchPrepareRequest,
     HeuristicMapRequest,
     MapDetectionBoxesRequest,
-    SubImageRunRequest,
-    SubImageToolResultRequest,
 )
 from app.services.llm_provider_service import LlmProviderService
 
@@ -100,116 +86,6 @@ async def api_map_heuristic(
         ocr_text=body.ocr_text,
     )
     return {"data": {"mappings": mappings, "method": "heuristic"}}
-
-
-@router.post("/agent-turn", summary="Scope/Image Sub-Agent 单轮 LLM（工具在客户端执行）")
-async def api_agent_turn(
-    body: AgentTurnRequest,
-    current_user: CurrentUser,
-    db: DbSession,
-    settings: SettingsDep,
-):
-    try:
-        llm = await _llm_for_provider(db, settings, current_user.id, body.provider_id)
-        items = [
-            MessageItem(
-                role=m.role,
-                content=m.content,
-                tool_call_id=m.tool_call_id,
-                tool_calls=[
-                    ToolCallOut(id=t.id, name=t.name, args=t.args)
-                    for t in (m.tool_calls or [])
-                ]
-                if m.tool_calls
-                else None,
-            )
-            for m in body.messages
-        ]
-        result = await run_agent_turn(llm, kind=body.kind, messages=items)
-        return {"data": result.model_dump()}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise _http_from_llm_error(exc) from exc
-
-
-async def _sub_image_sse(
-    *,
-    current_user: CurrentUser,
-    db: DbSession,
-    settings: Settings,
-    body: SubImageRunRequest,
-) -> AsyncIterator[str]:
-    try:
-        llm = await _llm_for_provider(db, settings, current_user.id, body.provider_id)
-        svc = LlmProviderService(db, settings)
-        provider_uuid = uuid.UUID(body.provider_id)
-        row = await svc.get_for_user(provider_uuid, current_user.id)
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="llm_provider_not_found")
-        provider_is_vision = await svc.ensure_vision_probed(row)
-        session = await create_session(current_user.id)
-        log_annotation_agent(
-            "sub-image-run-start",
-            "后端驱动子 Agent",
-            run_id=session.run_id,
-            image=body.image_relative_path,
-            provider_is_vision=provider_is_vision,
-        )
-        async for event in stream_sub_image_run(
-            session=session,
-            llm=llm,
-            provider_is_vision=provider_is_vision,
-            settings=settings,
-            user_request=body.user_request,
-            plan=body.plan,
-            image_relative_path=body.image_relative_path,
-            image_absolute_path=body.image_absolute_path,
-            label_candidates=body.label_candidates,
-            detection_model_id=body.detection_model_id,
-            image_base64=body.image_base64,
-        ):
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-    except HTTPException as exc:
-        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-        err = {"type": "error", "data": {"message": detail}}
-        yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
-    except Exception as exc:
-        logger.exception("sub_image_sse_failed")
-        http_exc = _http_from_llm_error(exc)
-        detail = http_exc.detail if isinstance(http_exc.detail, str) else "sub_image_run_failed"
-        err = {"type": "error", "data": {"message": detail}}
-        yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
-
-
-@router.post("/sub-image-run/stream", summary="后端驱动子 Agent（SSE + 客户端本地工具）")
-async def api_sub_image_run_stream(
-    body: SubImageRunRequest,
-    current_user: CurrentUser,
-    db: DbSession,
-    settings: SettingsDep,
-) -> StreamingResponse:
-    return StreamingResponse(
-        _sub_image_sse(current_user=current_user, db=db, settings=settings, body=body),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-@router.post("/sub-image-run/tool-result", summary="子 Agent 客户端工具执行结果")
-async def api_sub_image_tool_result(
-    body: SubImageToolResultRequest,
-    current_user: CurrentUser,
-) -> dict[str, bool]:
-    ok = await submit_client_tool_result(
-        body.run_id,
-        current_user.id,
-        body.tool_call_id,
-        body.content,
-    )
-    if not ok:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="sub_image_run_not_found")
-    return {"ok": True}
 
 
 @router.post("/batch-prepare", summary="批量准备（范围+计划，单次 LLM）")
@@ -350,4 +226,3 @@ async def api_map_detection_boxes(
         raise
     except Exception as exc:
         raise _http_from_llm_error(exc) from exc
-

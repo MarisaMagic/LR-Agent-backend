@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -63,38 +63,3 @@ class MapDetectionBoxesRequest(AnnotationLlmBaseRequest):
     mime_type: str = "image/jpeg"
 
 
-class ToolCallItem(BaseModel):
-    id: str = ""
-    name: str = ""
-    args: dict[str, Any] = Field(default_factory=dict)
-
-
-class AgentTurnMessageItem(BaseModel):
-    role: Literal["system", "human", "assistant", "tool"]
-    content: str = ""
-    tool_call_id: str | None = None
-    tool_calls: list[ToolCallItem] | None = None
-
-
-class AgentTurnRequest(AnnotationLlmBaseRequest):
-    kind: Literal["scope", "image"] = "scope"
-    messages: list[AgentTurnMessageItem] = Field(default_factory=list)
-
-
-class SubImageRunRequest(AnnotationLlmBaseRequest):
-    """Backend-driven sub-image ReAct; client executes local tools via SSE + tool-result."""
-
-    user_request: str = Field(min_length=1, max_length=20_000)
-    plan: dict[str, Any] = Field(default_factory=dict)
-    image_relative_path: str = Field(min_length=1, max_length=512)
-    image_absolute_path: str = Field(default="", max_length=1024)
-    label_candidates: list[dict[str, Any]] = Field(default_factory=list)
-    detection_model_id: str = Field(default="", max_length=128)
-    image_base64: str = Field(default="", max_length=16_000_000)
-    mime_type: str = "image/jpeg"
-
-
-class SubImageToolResultRequest(BaseModel):
-    run_id: str = Field(min_length=8, max_length=64)
-    tool_call_id: str = Field(min_length=1, max_length=128)
-    content: str = Field(default="", max_length=2_000_000)

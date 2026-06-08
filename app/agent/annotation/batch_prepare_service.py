@@ -91,7 +91,7 @@ async def prepare_batch_annotation(
     conversation_transcript: str = "",
     preselected_paths: list[str] | None = None,
 ) -> BatchPrepareResult:
-    """单次 LLM 调用：选图 + 生成 BatchPlan，供后续逐张 sub_image_run 使用。"""
+    """单次 LLM 调用：选图 + 生成 BatchPlan，供后续逐张确定性 detect → map → finalize 使用。"""
     if not candidates:
         empty_scope = AnnotationScopePayload()
         plan = build_batch_plan_from_data(

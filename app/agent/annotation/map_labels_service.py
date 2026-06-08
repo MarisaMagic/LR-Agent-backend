@@ -1,6 +1,6 @@
 """统一的检测框 → 标签映射服务（Fusion 主路径）。
 
-由 sub_image_run_service、/map-detection-boxes API、deterministicSubImageRunner 调用。
+由 /map-detection-boxes API、deterministicSubImageRunner 调用。
 映射策略（二选一，无纯文本 LLM 回退）：
   1. vision_crop：use_vision=true 且有图像时，逐框裁剪 + 并发视觉 LLM 映射
   2. heuristic：检测类名 / OCR 文本与标签名匹配（heuristic_map_service）

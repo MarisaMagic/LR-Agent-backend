@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 os.environ.setdefault("APP_ENV", "testing")
+# 测试不走真实 SMTP（.env 中 SMTP_HOST 会被覆盖为空，EmailService 仅打 mock 日志）
+os.environ["SMTP_HOST"] = ""
 
 from cryptography.fernet import Fernet
 

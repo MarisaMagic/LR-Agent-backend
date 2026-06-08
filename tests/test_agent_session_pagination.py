@@ -1,9 +1,13 @@
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 from httpx import AsyncClient
 
+from app.models.agent_message import AgentMessage
 from app.services.agent_chat_repository import AgentChatRepository
+
+
 @pytest.mark.asyncio
 async def test_list_sessions_cursor_and_summary(
     client: AsyncClient,
@@ -29,11 +33,27 @@ async def test_list_sessions_cursor_and_summary(
     settings = get_settings()
     repo = AgentChatRepository(db_session, fake_redis, settings)
 
+    now = datetime.now(timezone.utc)
     for index in range(3):
+        session_id = f"session-page-{index}"
         await repo.create_session(
             user_id,
-            session_id=f"session-page-{index}",
+            session_id=session_id,
             title=f"对话 {index}",
+        )
+        # list_sessions 会过滤无消息的 session，每会话至少一条消息
+        db_session.add(
+            AgentMessage(
+                id=f"msg-page-{index}",
+                session_id=session_id,
+                user_id=user_id,
+                role="user",
+                sort_index=0,
+                blocks_json=[{"type": "text", "content": f"内容 {index}"}],
+                status="done",
+                created_at=now,
+                updated_at=now,
+            ),
         )
     await db_session.commit()
 
@@ -43,7 +63,7 @@ async def test_list_sessions_cursor_and_summary(
     assert len(body["sessions"]) == 2
     assert body["has_more"] is True
     assert body["next_cursor"]
-    assert body["sessions"][0]["message_count"] == 0
+    assert body["sessions"][0]["message_count"] == 1
     assert body["sessions"][0]["message_ids"] == []
 
     second = await client.get(
