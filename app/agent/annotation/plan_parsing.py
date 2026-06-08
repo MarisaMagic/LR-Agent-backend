@@ -24,7 +24,7 @@ def build_batch_plan_from_data(
     default_conf: float,
     default_iou: float,
     provider_is_vision: bool,
-    log_prefix: str = "create-plan",
+    log_prefix: str = "batch-prepare",
 ) -> BatchPlanResult:
     label_strategy = str(data.get("label_strategy") or "map_each_box_to_label")
     if label_strategy not in ("single_label_for_all_boxes", "map_each_box_to_label"):

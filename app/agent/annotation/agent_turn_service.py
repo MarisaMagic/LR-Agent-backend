@@ -1,4 +1,13 @@
-"""Tool-bound LLM turns for client-executed annotation agents (fusion sub-agent tools)."""
+"""子 Agent 单轮 LLM 推理：工具绑定，实际执行在客户端。
+
+两种 Agent 类型（AgentKind）：
+  - scope：批量范围解析（glob / list / select 图片）
+  - image：单张图 bbox 标注（detect → map → finalize）
+
+由 annotation_agent API `/agent-turn` 直接调用，或被 sub_image_run_service 在多轮 ReAct 循环中复用。
+工具函数为 stub（返回 executed_on_client），仅用于 LLM 生成 tool_calls schema。
+"""
+
 from __future__ import annotations
 
 import json
@@ -20,24 +29,28 @@ AgentKind = Literal["scope", "image"]
 
 
 class ToolCallOut(BaseModel):
+    """单条 tool_call 输出。"""
     id: str
     name: str
     args: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentTurnResult(BaseModel):
+    """单轮 LLM 推理结果：文本回复 + tool_calls 列表。"""
     content: str = ""
     tool_calls: list[ToolCallOut] = Field(default_factory=list)
     finish_reason: str | None = None
 
 
 class MessageItem(BaseModel):
+    """可序列化的消息项，用于 API 请求/响应与多轮历史传递。"""
     role: Literal["system", "human", "assistant", "tool"]
     content: str = ""
     tool_call_id: str | None = None
     tool_calls: list[ToolCallOut] | None = None
 
 
+# scope 子 Agent：在项目目录内查找并确认待标注图片列表
 SCOPE_SYSTEM = """你是批量图片标注的范围解析 Agent。
 
 通过工具在项目目录内查找图片，不要猜测路径。
@@ -47,6 +60,7 @@ SCOPE_SYSTEM = """你是批量图片标注的范围解析 Agent。
 2. 确认后用 select_annotation_images 提交最终 relative_path 列表（可多张）。
 3. 路径必须来自工具返回结果。"""
 
+# image 子 Agent：单张图 detect → map → finalize 的 ReAct 工具链
 IMAGE_SYSTEM = """你是单张图片 bbox 标注子 Agent（fusion 工具链）。主流程已完成范围/计划解析。
 
 工作流程（ReAct，每次只输出一步）：
@@ -63,6 +77,7 @@ IMAGE_SYSTEM = """你是单张图片 bbox 标注子 Agent（fusion 工具链）�
 
 
 def _scope_tool_schemas() -> list[StructuredTool]:
+    """scope 子 Agent 可用工具：项目内图片查找与范围确认。"""
     class GlobInput(BaseModel):
         parent_folder: str = Field(default="", description="子目录如 data")
         name_pattern: str = Field(default="", description="文件名片段如 7.jpg")
@@ -102,6 +117,7 @@ def _scope_tool_schemas() -> list[StructuredTool]:
 
 
 def _image_tool_schemas() -> list[StructuredTool]:
+    """image 子 Agent 可用工具：检测、标签映射、提交标注。"""
     class DetectInput(BaseModel):
         file_path: str = Field(default="", description="图片绝对路径")
         model_id: str = Field(default="", description="YOLO 模型 id")
@@ -149,16 +165,19 @@ def _image_tool_schemas() -> list[StructuredTool]:
 
 
 def tools_for_kind(kind: AgentKind) -> list[StructuredTool]:
+    """按 Agent 类型返回对应工具 schema 列表。"""
     if kind == "scope":
         return _scope_tool_schemas()
     return _image_tool_schemas()
 
 
 def system_for_kind(kind: AgentKind) -> str:
+    """按 Agent 类型返回系统提示词。"""
     return SCOPE_SYSTEM if kind == "scope" else IMAGE_SYSTEM
 
 
 def messages_from_items(items: list[MessageItem]) -> list[BaseMessage]:
+    """将可序列化 MessageItem 转为 LangChain 消息链。"""
     out: list[BaseMessage] = []
     for item in items:
         if item.role == "system":
@@ -193,6 +212,7 @@ async def run_agent_turn(
     kind: AgentKind,
     messages: list[MessageItem],
 ) -> AgentTurnResult:
+    """执行子 Agent 单轮 LLM 推理，返回 content 与 tool_calls（由客户端或服务端后续执行）。"""
     tools = tools_for_kind(kind)
     llm_tools = llm.bind_tools(tools)
     lc_messages = messages_from_items(messages)

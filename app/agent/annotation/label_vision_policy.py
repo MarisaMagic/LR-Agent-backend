@@ -1,7 +1,12 @@
-"""When task labels cannot match YOLO class names, vision mapping is required."""
+"""标签视觉映射策略：判断任务标签是否必须启用视觉映射。
+
+当项目标签名与 YOLO/COCO 标准检测类名无交集时（如球员姓名 Curry/James vs person），
+启发式类名匹配无法工作，batch_prepare / plan_parsing 会据此建议 use_vision_mapping=true。
+"""
+
 from __future__ import annotations
 
-# Common COCO / YOLO detection class names (lowercase)
+# COCO / YOLO 常见检测类名（小写），用于与项目标签名比对
 YOLO_COCO_CLASS_NAMES = frozenset(
     {
         "person",
@@ -94,10 +99,7 @@ def _norm_label(name: str) -> str:
 
 
 def labels_require_vision_mapping(label_candidates: list[dict]) -> bool:
-    """
-    True when no project label name is a standard detection class
-    (e.g. Curry/James vs person) — heuristic mapping cannot work.
-    """
+    """判断标签候选是否需视觉映射：无标签名命中标准检测类名时返回 True。"""
     names = [_norm_label(str(c.get("name") or "")) for c in label_candidates]
     names = [n for n in names if n]
     if not names:

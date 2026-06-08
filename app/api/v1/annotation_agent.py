@@ -10,10 +10,7 @@ from openai import BadRequestError
 from app.agent.annotation import (
     prepare_batch_annotation,
     heuristic_map_boxes,
-    map_detection_boxes,
     map_detection_boxes_to_labels_unified,
-    map_detection_boxes_with_vision,
-    map_single_box_crop_vision,
     run_agent_turn,
 )
 from app.agent.annotation.debug_log import log_annotation_agent
@@ -34,9 +31,6 @@ from app.schemas.annotation_agent import (
     AgentTurnRequest,
     BatchPrepareRequest,
     HeuristicMapRequest,
-    MapBoxCropRequest,
-    MapBoxesRequest,
-    MapBoxesVisionRequest,
     MapDetectionBoxesRequest,
     SubImageRunRequest,
     SubImageToolResultRequest,
@@ -106,32 +100,6 @@ async def api_map_heuristic(
         ocr_text=body.ocr_text,
     )
     return {"data": {"mappings": mappings, "method": "heuristic"}}
-
-
-@router.post("/map-box-crop", summary="单框裁剪图视觉映射")
-async def api_map_box_crop(
-    body: MapBoxCropRequest,
-    current_user: CurrentUser,
-    db: DbSession,
-    settings: SettingsDep,
-):
-    try:
-        llm = await _llm_for_provider(db, settings, current_user.id, body.provider_id)
-        item = await map_single_box_crop_vision(
-            llm,
-            user_request=body.user_request,
-            intent_summary=body.intent_summary,
-            label_candidates=body.label_candidates,
-            box_index=body.box_index,
-            class_name=body.class_name,
-            crop_base64=body.crop_base64,
-            mime_type=body.mime_type,
-        )
-        return {"data": item.model_dump()}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise _http_from_llm_error(exc) from exc
 
 
 @router.post("/agent-turn", summary="Scope/Image Sub-Agent 单轮 LLM（工具在客户端执行）")
@@ -383,52 +351,3 @@ async def api_map_detection_boxes(
     except Exception as exc:
         raise _http_from_llm_error(exc) from exc
 
-
-@router.post("/map-boxes", summary="[legacy] 文本检测框映射")
-async def api_map_boxes(
-    body: MapBoxesRequest,
-    current_user: CurrentUser,
-    db: DbSession,
-    settings: SettingsDep,
-):
-    try:
-        llm = await _llm_for_provider(db, settings, current_user.id, body.provider_id)
-        result = await map_detection_boxes(
-            llm,
-            user_request=body.user_request,
-            intent_summary=body.intent_summary,
-            label_candidates=body.label_candidates,
-            boxes=body.boxes,
-            label_strategy=body.label_strategy,
-            single_label_id=body.single_label_id,
-        )
-        return {"data": result.model_dump()}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise _http_from_llm_error(exc) from exc
-
-
-@router.post("/map-boxes-vision", summary="视觉检测框映射到标签")
-async def api_map_boxes_vision(
-    body: MapBoxesVisionRequest,
-    current_user: CurrentUser,
-    db: DbSession,
-    settings: SettingsDep,
-):
-    try:
-        llm = await _llm_for_provider(db, settings, current_user.id, body.provider_id)
-        result = await map_detection_boxes_with_vision(
-            llm,
-            user_request=body.user_request,
-            intent_summary=body.intent_summary,
-            label_candidates=body.label_candidates,
-            boxes=body.boxes,
-            image_base64=body.image_base64,
-            mime_type=body.mime_type,
-        )
-        return {"data": result.model_dump()}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise _http_from_llm_error(exc) from exc

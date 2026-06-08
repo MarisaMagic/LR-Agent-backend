@@ -1,4 +1,17 @@
-"""Backend-driven ReAct loop for single-image bbox sub-agent; local tools run on the client."""
+"""后端驱动的单张图 bbox 子 Agent ReAct 循环。
+
+批量标注流水线中，batch_prepare 产出 plan 后，前端对每张图调用 `/sub-image-run/stream`：
+
+  SSE 事件流：
+    session → round → client_tool（等待客户端）→ done
+
+工具执行分工：
+  - 服务端：map_detection_boxes_to_labels（含视觉逐框映射）
+  - 客户端：run_object_detection（YOLO）、finalize_image_change（写入标注文件）
+
+每轮调用 agent_turn_service.run_agent_turn(kind="image") 获取 tool_calls。
+"""
+
 from __future__ import annotations
 
 import json
@@ -23,6 +36,7 @@ from app.services.llm_provider_service import LlmProviderService
 
 
 def _sse(event_type: str, data: dict[str, Any]) -> dict[str, Any]:
+    """包装 SSE 事件为 {type, data} 结构。"""
     return {"type": event_type, "data": data}
 
 
@@ -35,6 +49,7 @@ def _build_initial_human(
     label_candidates: list[dict[str, Any]],
     detection_model_id: str,
 ) -> str:
+    """构建首轮 human 消息：任务 brief + 标签候选 + 图片路径。"""
     brief = {
         "intent_summary": plan.get("intent_summary"),
         "label_strategy": plan.get("label_strategy"),
@@ -67,6 +82,7 @@ async def _execute_map_on_server(
     image_absolute_path: str = "",
     image_base64: str = "",
 ) -> str:
+    """在服务端执行标签映射，达标时自动标记 captured_finalize。"""
     boxes = state.boxes
     if not boxes:
         return json.dumps({"ok": False, "error": "无检测框；请先 run_object_detection"}, ensure_ascii=False)
@@ -134,6 +150,7 @@ async def stream_sub_image_run(
     detection_model_id: str,
     image_base64: str,
 ) -> AsyncIterator[dict[str, Any]]:
+    """单张图子 Agent 主循环：多轮 ReAct 直至 finalize 或达到 max_rounds。"""
     max_rounds = max(1, int(settings.annotation_sub_agent_max_iterations))
     use_vision = bool(plan.get("use_vision_mapping")) and provider_is_vision
     llm_map = llm if use_vision else None
@@ -192,6 +209,7 @@ async def stream_sub_image_run(
                 )
             )
 
+            # 逐工具执行：map 在服务端，detect/finalize 等待客户端
             for call in normalized:
                 if call.name == "map_detection_boxes_to_labels":
                     arg_boxes = call.args.get("boxes") if isinstance(call.args, dict) else None
@@ -273,6 +291,7 @@ async def stream_sub_image_run(
 
 
 def _normalize_box(raw: Any, idx: int) -> dict[str, Any]:
+    """规范化检测框字段（兼容 class_name / detection_label）。"""
     if not isinstance(raw, dict):
         return {"box_index": idx}
     return {
@@ -287,6 +306,7 @@ def _normalize_box(raw: Any, idx: int) -> dict[str, Any]:
 
 
 def _apply_detect_result(state: Any, tool_content: str) -> None:
+    """解析客户端 run_object_detection 结果，更新 session.state 中的检测框。"""
     try:
         parsed = json.loads(tool_content)
     except json.JSONDecodeError:
@@ -307,6 +327,7 @@ async def submit_client_tool_result(
     tool_call_id: str,
     content: str,
 ) -> bool:
+    """API 端点入口：接收客户端工具结果并唤醒等待中的 ReAct 循环。"""
     from app.agent.annotation.sub_image_run_session import get_session
 
     session = await get_session(run_id, user_id)

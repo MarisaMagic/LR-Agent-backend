@@ -1,4 +1,13 @@
-"""Unified detection-box → label mapping (fusion image_box_labels parity)."""
+"""统一的检测框 → 标签映射服务（Fusion 主路径）。
+
+由 sub_image_run_service、/map-detection-boxes API、deterministicSubImageRunner 调用。
+映射策略（二选一，无纯文本 LLM 回退）：
+  1. vision_crop：use_vision=true 且有图像时，逐框裁剪 + 并发视觉 LLM 映射
+  2. heuristic：检测类名 / OCR 文本与标签名匹配（heuristic_map_service）
+
+特殊快捷：label_strategy=single_label_for_all_boxes 时直接赋同一 label_id。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -28,6 +37,7 @@ CROP_VISION_SYSTEM = """你是视觉标注助手。你会收到一张裁剪后�
 
 
 def _resize_image_for_llm(img, max_side: int = 768):
+    """等比缩放裁剪图，控制视觉 LLM 输入尺寸。"""
     from PIL import Image
 
     w, h = img.size
@@ -38,6 +48,7 @@ def _resize_image_for_llm(img, max_side: int = 768):
 
 
 def _pil_to_data_url(img, fmt: str = "JPEG") -> str:
+    """将 PIL 图像编码为 data URL，供多模态 LLM 使用。"""
     buf = io.BytesIO()
     if fmt.upper() == "JPEG" and img.mode in ("RGBA", "P"):
         img = img.convert("RGB")
@@ -48,6 +59,7 @@ def _pil_to_data_url(img, fmt: str = "JPEG") -> str:
 
 
 def _coords_are_normalized(boxes: list[dict]) -> bool:
+    """判断检测框坐标是否为 0~1 归一化格式（任一维度 >1.5 则视为像素坐标）。"""
     for b in boxes:
         for key in ("x", "y", "width", "height"):
             try:
@@ -64,6 +76,7 @@ def _crop_boxes_from_image_bytes(
     *,
     normalized: bool,
 ) -> list[dict[str, Any]]:
+    """从原图按检测框裁剪子区域，生成带 data_url 的区域列表。"""
     from PIL import Image
 
     regions: list[dict[str, Any]] = []
@@ -111,6 +124,7 @@ async def _vision_map_box_with_crop(
     intent_summary: str,
     scope_note: str = "",
 ) -> dict[str, Any]:
+    """对单个裁剪区域调用视觉 LLM，返回 label_id 映射结果。"""
     valid_ids = {str(c.get("id") or "") for c in candidates}
     user_text = (
         f"用户请求：{user_request}\n意图：{intent_summary}\n"
@@ -157,6 +171,7 @@ async def _vision_map_regions_concurrent(
     scope_note: str,
     concurrency: int,
 ) -> list[dict[str, Any]]:
+    """并发执行多框视觉映射，Semaphore 控制并发度。"""
     sem = asyncio.Semaphore(max(1, concurrency))
 
     async def _map_one(region: dict[str, Any]) -> dict[str, Any]:
@@ -192,10 +207,7 @@ async def map_detection_boxes_to_labels_unified(
     mime_type: str = "image/jpeg",
     vision_map_concurrency: int | None = None,
 ) -> dict[str, Any]:
-    """
-    Fusion-style mapping: vision_crop when use_vision and llm+image present;
-    otherwise heuristic only (no text-only LLM fallback).
-    """
+    """统一映射入口：vision_crop（逐框裁剪）或 heuristic（类名/OCR 匹配）。"""
     scope_model = (
         scope
         if isinstance(scope, AnnotationScope)
@@ -260,6 +272,7 @@ async def map_detection_boxes_to_labels_unified(
             }
         )
 
+    # ── 路径 1：逐框裁剪视觉映射 ──────────────────────────────────────────
     if use_vision and llm is not None:
         if image_bytes is None:
             return {
@@ -309,6 +322,7 @@ async def map_detection_boxes_to_labels_unified(
             "next_step": "finalize_image_change",
         }
 
+    # ── 路径 2：启发式映射（无 LLM）──────────────────────────────────────
     heuristic_raw = heuristic_map_boxes(
         [
             {

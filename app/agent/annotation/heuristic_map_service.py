@@ -1,4 +1,12 @@
-"""Heuristic detection-box → label mapping without LLM (fusion-style fast path)."""
+"""启发式检测框 → 标签映射（无 LLM）。
+
+作为 map_detection_boxes_to_labels_unified 的非视觉回退路径，
+也可通过 /map-heuristic API 独立调用。匹配规则：
+  1. 检测类名与标签名精确匹配
+  2. 检测类名与标签名部分匹配（唯一命中时）
+  3. OCR 文本含唯一标签名
+"""
+
 from __future__ import annotations
 
 
@@ -8,6 +16,7 @@ def heuristic_map_boxes(
     *,
     ocr_text: str = "",
 ) -> list[dict]:
+    """为每个检测框尝试基于类名/OCR 的自动标签映射，无法匹配时 label_id 为空。"""
     by_name: dict[str, dict] = {}
     for item in label_candidates:
         name = str(item.get("name") or "").strip().lower()

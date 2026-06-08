@@ -1,4 +1,14 @@
-"""Single-shot batch prepare: image scope + execution plan (replaces parse-task + parse-scope + create-plan)."""
+"""批量标注准备：单次 LLM 同时完成图片范围选择与执行计划生成。
+
+替代原先多步 parse-task + parse-scope + create-plan 流程。
+由 annotation_agent API `/batch-prepare` 调用，前端在 execute_batch 路由后发起。
+
+输出 BatchPrepareResult：
+  - selected_paths：本轮待标注图片相对路径
+  - scope_reason：选图依据
+  - plan：子 Agent 执行计划（检测参数、标签策略、视觉映射、annotation_scope 等）
+"""
+
 from __future__ import annotations
 
 import json
@@ -47,6 +57,7 @@ def _filter_selected_paths(
     raw_paths: object,
     candidates: list[dict],
 ) -> tuple[list[str], str]:
+    """将 LLM 输出的路径列表过滤为候选中存在的 relative_path。"""
     by_path: dict[str, dict] = {}
     for item in candidates:
         rel = str(item.get("relative_path") or "").strip().replace("\\", "/")
@@ -80,6 +91,7 @@ async def prepare_batch_annotation(
     conversation_transcript: str = "",
     preselected_paths: list[str] | None = None,
 ) -> BatchPrepareResult:
+    """单次 LLM 调用：选图 + 生成 BatchPlan，供后续逐张 sub_image_run 使用。"""
     if not candidates:
         empty_scope = AnnotationScopePayload()
         plan = build_batch_plan_from_data(
@@ -112,6 +124,7 @@ async def prepare_batch_annotation(
     if label_names:
         labels_line = f"\n项目标签：{', '.join(label_names[:40])}\n"
 
+    # 回合理解已确定范围时，锁定 selected_paths 不让 LLM 修改
     locked_paths, _ = _filter_selected_paths(preselected_paths or [], candidates)
     locked_block = ""
     if locked_paths:

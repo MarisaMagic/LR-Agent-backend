@@ -40,31 +40,6 @@ class BatchPrepareRequest(AnnotationLlmBaseRequest):
     project: AnnotationProjectSnapshotInput | None = None
 
 
-class MapBoxesRequest(AnnotationLlmBaseRequest):
-    user_request: str = Field(min_length=1, max_length=20_000)
-    intent_summary: str = ""
-    label_candidates: list[dict[str, Any]] = Field(default_factory=list)
-    boxes: list[dict[str, Any]] = Field(default_factory=list)
-    label_strategy: str = "map_each_box_to_label"
-    single_label_id: str | None = None
-
-
-class MapBoxesVisionRequest(MapBoxesRequest):
-    image_base64: str = Field(default="", max_length=12_000_000)
-    mime_type: str = "image/jpeg"
-
-
-class MapBoxCropRequest(AnnotationLlmBaseRequest):
-    user_request: str = Field(min_length=1, max_length=20_000)
-    intent_summary: str = ""
-    label_candidates: list[dict[str, Any]] = Field(default_factory=list)
-    box_index: int = Field(ge=0, le=500)
-    class_name: str = ""
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    crop_base64: str = Field(default="", max_length=4_000_000)
-    mime_type: str = "image/jpeg"
-
-
 class HeuristicMapRequest(AnnotationLlmBaseRequest):
     boxes: list[dict[str, Any]] = Field(default_factory=list)
     label_candidates: list[dict[str, Any]] = Field(default_factory=list)

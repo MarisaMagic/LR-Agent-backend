@@ -14,23 +14,6 @@ class AnnotationScopePayload(BaseModel):
     exclude_label_names: list[str] = Field(default_factory=list)
 
 
-class AnnotationTaskParseResult(BaseModel):
-    """Annotation 路径任务理解（范围/检测策略），不负责 chat vs annotation 路由。"""
-
-    intent_summary: str = ""
-    needs_object_detection: bool = True
-    annotation_scope: AnnotationScopePayload = Field(default_factory=AnnotationScopePayload)
-
-
-# 兼容旧字段名；新代码请使用 AnnotationTaskParseResult
-AnnotationIntentResult = AnnotationTaskParseResult
-
-
-class ScopeParseResult(BaseModel):
-    selected_paths: list[str] = Field(default_factory=list)
-    reason: str = ""
-
-
 class DetectionHintsPayload(BaseModel):
     needs_object_detection: bool = True
     model_id: str | None = None
@@ -66,11 +49,3 @@ class BatchPrepareResult(BaseModel):
     scope_reason: str = ""
     plan: BatchPlanResult = Field(default_factory=BatchPlanResult)
 
-
-class BoxMappingItem(BaseModel):
-    box_index: int
-    label_id: str
-
-
-class MapBoxesResult(BaseModel):
-    mappings: list[BoxMappingItem] = Field(default_factory=list)
