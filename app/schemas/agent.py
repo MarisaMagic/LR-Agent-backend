@@ -231,6 +231,7 @@ class StreamEventPayload(BaseModel):
     arguments: str | None = None
     result: str | None = None
     message: str | None = None
+    image_path: str | None = None
     mode: str | None = None
     domain: str | None = None
     target: str | None = None
@@ -253,6 +254,7 @@ class StreamEventPayload(BaseModel):
             arguments=data.get("arguments"),
             result=data.get("result"),
             message=data.get("message"),
+            image_path=data.get("imagePath") or data.get("image_path"),
             mode=data.get("mode"),
             domain=data.get("domain"),
             target=data.get("target"),

@@ -367,6 +367,9 @@ async def map_detection_boxes_to_labels_unified(
     image_base64: str = "",
     mime_type: str = "image/jpeg",
     vision_map_concurrency: int | None = None,
+    judge_feedback: str = "",
+    previous_mappings: list[dict] | None = None,
+    attempt: int = 0,
 ) -> dict[str, Any]:
     """统一映射入口：vision_crop（逐框裁剪）或 heuristic（类名/OCR 匹配）。"""
     scope_model = (
@@ -447,6 +450,15 @@ async def map_detection_boxes_to_labels_unified(
         scope_note = ""
         if scope_model.is_restricted():
             scope_note = f"\n用户标注范围：{scope_model.scope_summary or scope_model.to_payload().model_dump()}"
+        if judge_feedback.strip():
+            scope_note += f"\n【评分子 Agent 反馈】{judge_feedback.strip()}"
+        if previous_mappings:
+            scope_note += (
+                "\n上一轮映射结果（本轮需结合评分反馈修正）："
+                f"{json.dumps(previous_mappings[:40], ensure_ascii=False)}"
+            )
+        if attempt > 0:
+            scope_note += f"\n当前为第 {attempt + 1} 轮整图重新打标签。"
 
         pool = await resolve_effective_label_candidates(
             llm,

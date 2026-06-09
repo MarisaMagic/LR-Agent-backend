@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     annotation_prepare_temperature: float = 0.1
     annotation_vision_map_validate: bool = True
     annotation_vision_map_max_retries: int = 2
+    annotation_judge_enabled: bool = True
+    annotation_judge_max_retries: int = 3
+    annotation_judge_temperature: float = 0.0
     annotation_label_pool_preflight: Literal["off", "auto", "always"] = "auto"
     annotation_label_pool_preflight_min_extra: int = 2
     agent_chat_vision_max_edge: int = 1280

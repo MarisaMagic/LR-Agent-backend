@@ -61,5 +61,24 @@ class MapDetectionBoxesRequest(AnnotationLlmBaseRequest):
     image_absolute_path: str = Field(default="", max_length=1024)
     image_base64: str = Field(default="", max_length=16_000_000)
     mime_type: str = "image/jpeg"
+    judge_feedback: str = Field(default="", max_length=8_000)
+    previous_mappings: list[dict[str, Any]] = Field(default_factory=list)
+    attempt: int = Field(default=0, ge=0, le=20)
+
+
+class JudgeDetectionLabelsRequest(AnnotationLlmBaseRequest):
+    """Whole-image judge for finalized detection-box label assignments."""
+
+    user_request: str = Field(default="", max_length=20_000)
+    intent_summary: str = ""
+    label_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    boxes: list[dict[str, Any]] = Field(default_factory=list)
+    mappings: list[dict[str, Any]] = Field(default_factory=list)
+    annotations: list[dict[str, Any]] = Field(default_factory=list)
+    image_absolute_path: str = Field(default="", max_length=1024)
+    image_base64: str = Field(default="", max_length=16_000_000)
+    mime_type: str = "image/jpeg"
+    attempt: int = Field(default=0, ge=0, le=20)
+    max_retries: int = Field(default=3, ge=0, le=20)
 
 

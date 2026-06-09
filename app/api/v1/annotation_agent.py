@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, status
 from openai import BadRequestError
 
 from app.agent.annotation import (
+    judge_detection_labels,
     prepare_batch_annotation,
     heuristic_map_boxes,
     map_detection_boxes_to_labels_unified,
@@ -19,6 +20,7 @@ from app.services.agent_chat_repository import AgentChatRepository
 from app.schemas.annotation_agent import (
     BatchPrepareRequest,
     HeuristicMapRequest,
+    JudgeDetectionLabelsRequest,
     MapDetectionBoxesRequest,
 )
 from app.services.llm_provider_service import LlmProviderService
@@ -154,6 +156,10 @@ async def api_batch_prepare(
             "selected_paths": result.selected_paths,
             "scope_reason": result.scope_reason,
             "resolved_user_request": user_request,
+            "judge_config": {
+                "enabled": settings.annotation_judge_enabled and provider_is_vision,
+                "max_retries": settings.annotation_judge_max_retries,
+            },
             **result.plan.model_dump(),
         }
         return {"data": payload}
@@ -222,6 +228,9 @@ async def api_map_detection_boxes(
             image_absolute_path=body.image_absolute_path,
             image_base64=body.image_base64,
             mime_type=body.mime_type,
+            judge_feedback=body.judge_feedback,
+            previous_mappings=body.previous_mappings,
+            attempt=body.attempt,
         )
         log_annotation_agent(
             "map-api-result",
@@ -233,6 +242,72 @@ async def api_map_detection_boxes(
             unmapped=len(result.get("unmapped_indices") or []),
             label_pool_source=result.get("label_pool_source"),
             hint=result.get("hint"),
+        )
+        return {"data": result}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _http_from_llm_error(exc) from exc
+
+
+@router.post("/judge-detection-labels", summary="整图评分复核检测框标签")
+async def api_judge_detection_labels(
+    body: JudgeDetectionLabelsRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+    settings: SettingsDep,
+):
+    try:
+        if not settings.annotation_judge_enabled:
+            return {
+                "data": {
+                    "ok": True,
+                    "verdict": "accept",
+                    "confidence": 1.0,
+                    "summary": "JudgeAgent 未启用，直接通过。",
+                    "issues": [],
+                    "retry_feedback": "",
+                    "checked_boxes": len(body.boxes),
+                }
+            }
+        svc = LlmProviderService(db, settings)
+        row = await svc.get_for_user(uuid.UUID(body.provider_id), current_user.id)
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="llm_provider_not_found")
+        provider_is_vision = await svc.ensure_vision_probed(row)
+        if not provider_is_vision:
+            return {
+                "data": {
+                    "ok": False,
+                    "error": "vision_not_supported",
+                    "verdict": "reject",
+                    "confidence": 0.0,
+                    "summary": "评分子 Agent 需要多模态视觉模型。",
+                    "issues": [],
+                    "retry_feedback": "请使用通过视觉探针的多模态模型。",
+                    "checked_boxes": 0,
+                }
+            }
+        llm = await _llm_for_provider(
+            db,
+            settings,
+            current_user.id,
+            body.provider_id,
+            temperature=settings.annotation_judge_temperature,
+        )
+        result = await judge_detection_labels(
+            llm,
+            user_request=body.user_request,
+            intent_summary=body.intent_summary,
+            label_candidates=body.label_candidates,
+            boxes=body.boxes,
+            mappings=body.mappings,
+            annotations=body.annotations,
+            image_absolute_path=body.image_absolute_path,
+            image_base64=body.image_base64,
+            attempt=body.attempt,
+            max_retries=body.max_retries,
+            settings=settings,
         )
         return {"data": result}
     except HTTPException:

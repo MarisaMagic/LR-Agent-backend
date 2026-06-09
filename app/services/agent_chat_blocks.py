@@ -2,6 +2,78 @@ from typing import Any
 
 from app.schemas.agent import StreamEventPayload
 
+PIPELINE_IMAGE_DETAIL_STAGES = frozenset({"worker", "judge", "retry"})
+PIPELINE_RUNNING_DETAIL_TAIL = 5
+
+
+def _is_image_detail_stage(stage: str | None) -> bool:
+    return stage in PIPELINE_IMAGE_DETAIL_STAGES
+
+
+def _extract_image_path_from_worker_message(message: str | None) -> str | None:
+    if not message:
+        return None
+    trimmed = message.strip()
+    colon = trimmed.find("：")
+    if colon < 0:
+        return None
+    path = trimmed[colon + 1 :].strip()
+    return path or None
+
+
+def _resolve_pipeline_image_path(step: dict[str, Any], incoming_path: str | None = None) -> str | None:
+    explicit = (incoming_path or step.get("imagePath") or step.get("image_path") or "").strip()
+    if explicit:
+        return explicit
+    return _extract_image_path_from_worker_message(str(step.get("message") or ""))
+
+
+def _trim_running_detail_tail(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    main = [s for s in steps if not _is_image_detail_stage(s.get("stage"))]
+    details = [s for s in steps if _is_image_detail_stage(s.get("stage"))]
+    terminal = [s for s in details if s.get("status") != "running"]
+    running = [s for s in details if s.get("status") == "running"]
+    return main + terminal + running[-PIPELINE_RUNNING_DETAIL_TAIL:]
+
+
+def _upsert_image_detail_step(
+    steps: list[dict[str, Any]],
+    incoming: dict[str, Any],
+) -> list[dict[str, Any]]:
+    image_path = _resolve_pipeline_image_path(incoming, incoming.get("imagePath") or incoming.get("image_path"))
+    with_path = {**incoming}
+    if image_path:
+        with_path["imagePath"] = image_path
+
+    main = [dict(s) for s in steps if not _is_image_detail_stage(s.get("stage"))]
+    details = [dict(s) for s in steps if _is_image_detail_stage(s.get("stage"))]
+
+    if image_path:
+        idx = next(
+            (i for i, s in enumerate(details) if _resolve_pipeline_image_path(s) == image_path),
+            -1,
+        )
+        if idx >= 0:
+            details[idx] = with_path
+        else:
+            details.append(with_path)
+    else:
+        idx = next(
+            (
+                i
+                for i, s in enumerate(details)
+                if s.get("stage") == incoming.get("stage") and s.get("message") == incoming.get("message")
+            ),
+            -1,
+        )
+        if idx >= 0:
+            details[idx] = with_path
+        else:
+            details.append(with_path)
+
+    return _trim_running_detail_tail(main + details)
+
+
 PIPELINE_STAGE_LABELS: dict[str, str] = {
     "prepare": "准备批量标注",
     "task": "解析任务",
@@ -10,6 +82,8 @@ PIPELINE_STAGE_LABELS: dict[str, str] = {
     "plan": "生成计划",
     "workers": "批量处理",
     "worker": "处理图片",
+    "judge": "评分复核",
+    "retry": "重新打标签",
     "tool": "工具调用",
 }
 
@@ -29,6 +103,7 @@ def _apply_annotation_progress_to_blocks(
         "message": event.message or "",
         "status": event.status or "running",
         "detail": event.detail,
+        "imagePath": event.image_path,
     }
 
     def upsert_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -37,23 +112,13 @@ def _apply_annotation_progress_to_blocks(
             if (
                 step.get("status") == "running"
                 and step.get("stage") != event.stage
-                and event.stage != "worker"
+                and not _is_image_detail_stage(event.stage)
             ):
                 updated.append({**step, "status": "done"})
             else:
                 updated.append(dict(step))
-        if event.stage == "worker":
-            idx = next(
-                (i for i, s in enumerate(updated) if s.get("stage") == "worker" and s.get("message") == event.message),
-                -1,
-            )
-            if idx >= 0:
-                updated[idx] = incoming
-                return updated
-            trimmed = [s for s in updated if s.get("stage") != "worker"] + [incoming]
-            workers = [s for s in trimmed if s.get("stage") == "worker"]
-            rest = [s for s in trimmed if s.get("stage") != "worker"]
-            return rest + workers[-12:]
+        if _is_image_detail_stage(event.stage):
+            return _upsert_image_detail_step(updated, incoming)
         idx = next((i for i, s in enumerate(updated) if s.get("stage") == event.stage), -1)
         if idx >= 0:
             updated[idx] = incoming
@@ -193,6 +258,29 @@ def apply_stream_event_to_blocks(
         return next_blocks
 
     return next_blocks
+
+
+def finalize_pipeline_steps_in_blocks(
+    blocks: list[dict[str, Any]],
+    *,
+    terminal_status: str = "done",
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for block in blocks:
+        if block.get("type") != "annotation_pipeline":
+            result.append(dict(block))
+            continue
+        steps = [
+            {
+                **step,
+                "status": terminal_status
+                if step.get("status") == "running"
+                else step.get("status"),
+            }
+            for step in (block.get("steps") or [])
+        ]
+        result.append({**block, "steps": steps})
+    return result
 
 
 def collapse_assistant_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:

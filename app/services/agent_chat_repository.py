@@ -25,6 +25,7 @@ from app.services.agent_chat_blocks import (
     blocks_to_preview,
     blocks_to_text,
     collapse_assistant_blocks,
+    finalize_pipeline_steps_in_blocks,
 )
 from app.services.agent_chat_cache import AgentChatCache
 from app.services.agent_session_cursor import decode_session_cursor, encode_session_cursor
@@ -448,9 +449,14 @@ class AgentChatRepository:
 
         if row is not None:
             if cached and cached.get("blocks"):
-                row.blocks_json = collapse_assistant_blocks(cached["blocks"])
+                blocks = collapse_assistant_blocks(cached["blocks"])
             else:
-                row.blocks_json = collapse_assistant_blocks(row.blocks_json)
+                blocks = collapse_assistant_blocks(row.blocks_json)
+            if status == "done":
+                blocks = finalize_pipeline_steps_in_blocks(blocks, terminal_status="done")
+            elif status == "error":
+                blocks = finalize_pipeline_steps_in_blocks(blocks, terminal_status="error")
+            row.blocks_json = blocks
             row.status = status
             row.error = error
             row.updated_at = datetime.now(timezone.utc)
