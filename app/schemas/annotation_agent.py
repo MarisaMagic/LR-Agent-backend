@@ -22,6 +22,16 @@ class AnnotationLlmBaseRequest(BaseModel):
     provider_id: str = Field(min_length=1, max_length=64)
 
 
+class MutationPrepareRequest(AnnotationLlmBaseRequest):
+    user_request: str = Field(min_length=1, max_length=20_000)
+    session_id: str | None = Field(default=None, max_length=64)
+    current_relative_path: str = ""
+    candidates: list[ImageCandidateInput] = Field(default_factory=list)
+    label_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    selected_annotation_ids: list[str] = Field(default_factory=list)
+    project: AnnotationProjectSnapshotInput | None = None
+
+
 class BatchPrepareRequest(AnnotationLlmBaseRequest):
     """Single-shot scope + plan (replaces separate parse-task / parse-scope / create-plan in batch)."""
 

@@ -119,6 +119,29 @@ def build_project_assistant_system_prompt(client_context: ClientContextInput | N
     )
 
 
+def format_turn_task_addon(client_context: ClientContextInput | None) -> str:
+    """按回合理解 task_intent / turn_kind 追加任务模板。"""
+    if client_context is None or client_context.turn_understanding is None:
+        return ""
+    tu = client_context.turn_understanding
+    kind = tu.turn_kind or tu.task_intent
+    if kind == "generate_report":
+        return (
+            "\n【本轮任务：生成报告】\n"
+            "请用 Markdown 撰写数据分析或标注质量报告；先通过工具收集标注/项目信息，"
+            "结构含摘要、统计、发现与建议；勿声称已写入文件。"
+        )
+    if kind == "generate_document":
+        return (
+            "\n【本轮任务：生成说明文档】\n"
+            "请用 Markdown 撰写项目说明或标注规范文档；结合项目快照与工具读取结果；"
+            "条理清晰，适合保存为 .md 文件。"
+        )
+    if kind in ("query_annotation", "converse") and tu.task_intent == "query_annotation":
+        return "\n【本轮侧重】查询已有标注 JSON，优先 read_file_annotation。"
+    return ""
+
+
 def build_assist_system_prompt(
     client_context: ClientContextInput | None,
     *,
@@ -138,4 +161,6 @@ def build_assist_system_prompt(
         task = build_workspace_assistant_system_prompt(client_context)
     else:
         task = WORKSPACE_ASSIST_TASK
-    return f"{identity}\n\n{task}"
+    addon = format_turn_task_addon(client_context)
+    base = f"{identity}\n\n{task}"
+    return f"{base}\n{addon}" if addon else base

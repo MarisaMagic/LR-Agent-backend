@@ -95,6 +95,14 @@ class Settings(BaseSettings):
     agent_read_file_max_lines: int = 2000
     agent_read_document_max_pages: int = 30
 
+    agent_mutation_enabled: bool = True
+    agent_analysis_enabled: bool = True
+    agent_document_write_enabled: bool = True
+    agent_analysis_timeout_seconds: int = 60
+    agent_analysis_max_stdout_bytes: int = 1_048_576
+    agent_analysis_rate_limit_per_hour: int = 20
+    agent_analysis_snapshot_max_bytes: int = 2_097_152
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:

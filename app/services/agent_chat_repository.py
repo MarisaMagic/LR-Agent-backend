@@ -408,6 +408,8 @@ class AgentChatRepository:
             "tool_result",
             "annotation_progress",
             "annotation_proposal",
+            "analysis_script_proposal",
+            "document_proposal",
         ):
             return
 

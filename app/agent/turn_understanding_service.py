@@ -9,9 +9,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.agent.annotation.llm_invoke import invoke_json_model
 from app.agent.context_helpers import (
@@ -23,7 +25,9 @@ from app.agent.context_helpers import (
 )
 from app.schemas.agent import ClientContextInput, TaskIntentLiteral, TurnKindLiteral
 
-# 回合理解 LLM 的系统提示词（决策规则；字段结构由 TurnUnderstandingLlmResult 约束）
+logger = logging.getLogger(__name__)
+
+# 回合理解 LLM 的系统提示词（决策规则 + JSON 契约）
 UNDERSTAND_SYSTEM = """你是 LR-Agent 回合理解与路由模块。根据 human 消息中的对话历史、界面状态与当前用户输入，一次性输出 JSON（勿分步、勿输出 Markdown）。
 
 ## 决策任务
@@ -36,6 +40,10 @@ UNDERSTAND_SYSTEM = """你是 LR-Agent 回合理解与路由模块。根据 huma
 
 2. 路由 turn_kind（不受 agent_mode 影响）
    - execute_batch：需要启动标注流水线（检测、批量标注、补标、纠正遗漏等）。
+   - mutate_annotation：修改或删除已有标注（改标签、删框、批量纠正标签；不含新增检测框）。
+   - analyze_data：对标注或项目数据进行统计、分布、聚合分析（将执行 Python 脚本）。
+   - generate_report：生成数据分析或标注质量 Markdown 报告。
+   - generate_document：生成项目说明、标注规范等 Markdown 文档。
    - converse：问答、解释、查已有标注 JSON、寒暄、需看图描述。
    - clarify_scope：与标注相关但图片范围仍不明确，需先追问。
    - unsupported：当前项目类型无法执行（极少）。
@@ -44,12 +52,32 @@ UNDERSTAND_SYSTEM = """你是 LR-Agent 回合理解与路由模块。根据 huma
    - true：必须分析图像像素才能回答，且读取已有标注 JSON 无法解决。
    - false：读标注文件/文本即可，或无需看图。
 
-## 输出要求
+## 输出 JSON 结构（必须严格遵守类型）
+
+{
+  "resolved_user_content": "补全指代后的完整中文句",
+  "referenced_relative_paths": ["data/2.jpg"],
+  "resolved_active_relative_path": "data/2.jpg",
+  "task_intent": "mutate_annotation",
+  "turn_kind": "mutate_annotation",
+  "needs_vision_input": false,
+  "confidence": 0.9,
+  "scope_notes": "",
+  "reason": "用户要求删除指定图片的全部标注",
+  "user_visible_hint": null
+}
+
+## 字段说明
 
 - resolved_user_content：补全指代后的完整中文句，可独立理解。
 - task_intent 与 turn_kind 保持一致；查标注 JSON 用 query_annotation，其余与 turn_kind 对齐。
-- confidence：0~1；scope_notes / reason：简短中文说明依据。
-- user_visible_hint：仅当需向用户追问范围时填写，否则 null。"""
+- confidence：0~1 浮点数。
+- reason：路由决策依据，**必填字符串**（不可为 null）。
+- scope_notes：路径/范围解析的补充说明；无补充时写 **空字符串 \"\"**，**禁止 null**。
+- user_visible_hint：仅 turn_kind=clarify_scope 且需向用户追问时填写字符串，否则 **null**。
+- resolved_active_relative_path：无明确主图时为 **null**（仅此字段与 user_visible_hint 可为 null）。
+
+所有字符串字段（含 scope_notes、reason）无内容时必须输出 \"\"，不要用 null 表示「不适用」。"""
 
 
 class TurnUnderstandingLlmResult(BaseModel):
@@ -64,6 +92,15 @@ class TurnUnderstandingLlmResult(BaseModel):
     scope_notes: str = ""
     reason: str = ""
     user_visible_hint: str | None = None
+
+    @field_validator("scope_notes", "reason", mode="before")
+    @classmethod
+    def _coerce_null_strings(cls, value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return str(value)
 
 
 class TurnUnderstandingResult(BaseModel):
@@ -81,7 +118,17 @@ class TurnUnderstandingResult(BaseModel):
 
 
 _VALID_TURN_KINDS: frozenset[str] = frozenset(
-    {"execute_batch", "converse", "clarify_scope", "unsupported", "wants_batch"},
+    {
+        "execute_batch",
+        "mutate_annotation",
+        "analyze_data",
+        "generate_report",
+        "generate_document",
+        "converse",
+        "clarify_scope",
+        "unsupported",
+        "wants_batch",
+    },
 )
 
 
@@ -146,7 +193,7 @@ def _llm_to_result(parsed: TurnUnderstandingLlmResult) -> TurnUnderstandingResul
         turn_kind=turn_kind,
         needs_vision_input=parsed.needs_vision_input,
         confidence=parsed.confidence,
-        scope_notes=parsed.scope_notes,
+        scope_notes=parsed.scope_notes or "",
         reason=parsed.reason or "llm",
         user_visible_hint=parsed.user_visible_hint,
     )
@@ -173,8 +220,19 @@ async def understand_turn(
         llm,
         [SystemMessage(content=UNDERSTAND_SYSTEM), HumanMessage(content=human)],
         TurnUnderstandingLlmResult,
+        log_label="turn_understand",
+        null_string_fields=("scope_notes", "reason"),
     )
-    return _llm_to_result(parsed)
+    result = _llm_to_result(parsed)
+    logger.info(
+        "[turn_understand] turn_kind=%s task_intent=%s paths=%s scope_notes=%r reason=%r",
+        result.turn_kind,
+        result.task_intent,
+        result.referenced_relative_paths,
+        result.scope_notes,
+        result.reason,
+    )
+    return result
 
 
 def format_understanding_for_system_prompt(result: TurnUnderstandingResult) -> str:

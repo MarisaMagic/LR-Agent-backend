@@ -36,6 +36,10 @@ class AnnotationProjectSnapshotInput(BaseModel):
 
 TurnKindLiteral = Literal[
     "execute_batch",
+    "mutate_annotation",
+    "analyze_data",
+    "generate_report",
+    "generate_document",
     "converse",
     "clarify_scope",
     "wants_batch",
@@ -46,6 +50,12 @@ TaskIntentLiteral = Literal[
     "converse",
     "query_annotation",
     "execute_batch",
+    "mutate_annotation",
+    "edit_annotation",
+    "delete_annotation",
+    "analyze_data",
+    "generate_report",
+    "generate_document",
     "clarify_scope",
     "wants_batch",
     "unsupported",
@@ -76,6 +86,8 @@ class ClientContextInput(BaseModel):
     annotation_project_modality: str | None = None
     annotation_project_type: str | None = None
     agent_mode: Literal["chat", "annotation"] | None = None
+    selected_annotation_id: str | None = None
+    selected_annotation_ids: list[str] = Field(default_factory=list)
     annotation_project_snapshot: AnnotationProjectSnapshotInput | None = None
     turn_understanding: TurnUnderstandingResultSchema | None = None
 
@@ -239,24 +251,42 @@ class StreamEventPayload(BaseModel):
 
     @classmethod
     def from_client_dict(cls, data: dict[str, Any]) -> "StreamEventPayload":
+        event_type = str(data.get("type") or "")
+        content = data.get("content")
+        detail = data.get("detail")
+        message = data.get("message")
+        if event_type == "analysis_script_proposal":
+            content = data.get("script") or content
+            detail = data.get("explanation") or detail
+            message = data.get("error") or message
+        image_path = data.get("imagePath") or data.get("image_path")
+        summary = data.get("summary")
+        if event_type == "document_proposal":
+            content = data.get("content") or content
+            detail = data.get("title") or detail
+            image_path = data.get("suggestedRelativePath") or data.get("suggested_relative_path") or image_path
+            summary = data.get("title") or summary
+        domain = data.get("domain")
+        if event_type == "annotation_progress":
+            domain = data.get("pipelineKind") or data.get("pipeline_kind") or domain
         return cls(
-            type=str(data.get("type") or ""),
-            content=data.get("content"),
+            type=event_type,
+            content=content,
             stage=data.get("stage"),
             status=data.get("status"),
-            detail=data.get("detail"),
+            detail=detail,
             proposal=data.get("proposal"),
-            summary=data.get("summary"),
+            summary=summary,
             summary_up_to_message_id=data.get("summaryUpToMessageId") or data.get("summary_up_to_message_id"),
             token_estimate=data.get("tokenEstimate") or data.get("token_estimate"),
             tool_call_id=data.get("toolCallId") or data.get("tool_call_id"),
             name=data.get("name"),
             arguments=data.get("arguments"),
             result=data.get("result"),
-            message=data.get("message"),
-            image_path=data.get("imagePath") or data.get("image_path"),
+            message=message,
+            image_path=image_path,
             mode=data.get("mode"),
-            domain=data.get("domain"),
+            domain=domain,
             target=data.get("target"),
             reason=data.get("reason"),
         )

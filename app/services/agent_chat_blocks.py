@@ -74,8 +74,26 @@ def _upsert_image_detail_step(
     return _trim_running_detail_tail(main + details)
 
 
+ANALYSIS_PIPELINE_STAGE_LABELS: dict[str, str] = {
+    "collect": "收集数据",
+    "prepare": "生成脚本",
+    "execute": "运行脚本",
+    "summarize": "解读结果",
+}
+
+MUTATION_PIPELINE_STAGE_LABELS: dict[str, str] = {
+    "prepare": "解析意图",
+    "resolve": "定位目标",
+}
+
+REPORT_PIPELINE_STAGE_LABELS: dict[str, str] = {
+    "collect": "收集数据",
+    "prepare": "生成报告",
+}
+
 PIPELINE_STAGE_LABELS: dict[str, str] = {
-    "prepare": "准备批量标注",
+    "prepare": "准备",
+    "resolve": "定位目标",
     "task": "解析任务",
     "catalog": "扫描图片",
     "scope": "解析范围",
@@ -88,7 +106,13 @@ PIPELINE_STAGE_LABELS: dict[str, str] = {
 }
 
 
-def _label_for_pipeline_stage(stage: str) -> str:
+def _label_for_pipeline_stage(stage: str, pipeline_kind: str = "batch") -> str:
+    if pipeline_kind == "analysis":
+        return ANALYSIS_PIPELINE_STAGE_LABELS.get(stage, stage)
+    if pipeline_kind == "mutation":
+        return MUTATION_PIPELINE_STAGE_LABELS.get(stage, stage)
+    if pipeline_kind == "report":
+        return REPORT_PIPELINE_STAGE_LABELS.get(stage, stage)
     return PIPELINE_STAGE_LABELS.get(stage, stage)
 
 
@@ -97,9 +121,10 @@ def _apply_annotation_progress_to_blocks(
     event: StreamEventPayload,
 ) -> list[dict[str, Any]]:
     next_blocks = [dict(block) for block in blocks]
+    pipeline_kind = (event.domain or "batch").strip() or "batch"
     incoming = {
         "stage": event.stage or "",
-        "label": _label_for_pipeline_stage(event.stage or ""),
+        "label": _label_for_pipeline_stage(event.stage or "", pipeline_kind),
         "message": event.message or "",
         "status": event.status or "running",
         "detail": event.detail,
@@ -125,13 +150,22 @@ def _apply_annotation_progress_to_blocks(
             return updated
         return updated + [incoming]
 
-    pipeline_idx = next((i for i, b in enumerate(next_blocks) if b.get("type") == "annotation_pipeline"), -1)
+    pipeline_idx = next(
+        (
+            i
+            for i, b in enumerate(next_blocks)
+            if b.get("type") == "annotation_pipeline"
+            and (b.get("pipelineKind") or "batch") == pipeline_kind
+        ),
+        -1,
+    )
     if pipeline_idx < 0:
         next_blocks.append(
             {
                 "type": "annotation_pipeline",
                 "collapsed": False,
                 "steps": [incoming],
+                "pipelineKind": pipeline_kind,
             },
         )
         return next_blocks
@@ -139,6 +173,7 @@ def _apply_annotation_progress_to_blocks(
     block = next_blocks[pipeline_idx]
     next_blocks[pipeline_idx] = {
         **block,
+        "pipelineKind": pipeline_kind,
         "steps": upsert_steps(list(block.get("steps") or [])),
     }
     return next_blocks
@@ -257,6 +292,71 @@ def apply_stream_event_to_blocks(
         next_blocks.append(proposal_block)
         return next_blocks
 
+    if event.type == "analysis_script_proposal":
+        status = event.status or "pending"
+        if status in ("done", "error"):
+            for i, block in enumerate(next_blocks):
+                if (
+                    block.get("type") == "annotation_pipeline"
+                    and (block.get("pipelineKind") or "batch") == "analysis"
+                ):
+                    next_blocks[i] = {
+                        **block,
+                        "collapsed": True,
+                        "steps": [
+                            {
+                                **step,
+                                "status": "done"
+                                if step.get("status") == "running"
+                                else step.get("status"),
+                            }
+                            for step in (block.get("steps") or [])
+                        ],
+                    }
+        script_block = {
+            "type": "analysis_script_proposal",
+            "script": event.content or "",
+            "explanation": event.detail or "",
+            "status": status,
+        }
+        if event.result:
+            script_block["result"] = event.result
+        if event.message:
+            script_block["error"] = event.message
+        next_blocks = [b for b in next_blocks if b.get("type") != "analysis_script_proposal"]
+        next_blocks.append(script_block)
+        return next_blocks
+
+    if event.type == "document_proposal":
+        for i, block in enumerate(next_blocks):
+            if (
+                block.get("type") == "annotation_pipeline"
+                and (block.get("pipelineKind") or "batch") == "report"
+            ):
+                next_blocks[i] = {
+                    **block,
+                    "collapsed": True,
+                    "steps": [
+                        {
+                            **step,
+                            "status": "done"
+                            if step.get("status") == "running"
+                            else step.get("status"),
+                        }
+                        for step in (block.get("steps") or [])
+                    ],
+                }
+        doc_block = {
+            "type": "document_proposal",
+            "title": event.summary or "文档",
+            "content": event.content or "",
+            "suggestedRelativePath": event.image_path or "docs/document.md",
+            "status": event.status or "pending",
+        }
+        next_blocks = [b for b in next_blocks if b.get("type") != "document_proposal"]
+        next_blocks.append(doc_block)
+        return next_blocks
+
     return next_blocks
 
 
@@ -293,6 +393,45 @@ def collapse_assistant_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, An
     return result
 
 
+def block_to_transcript_line(block: dict[str, Any]) -> str | None:
+    """将非 text 提案块转为单行 transcript 摘要，供历史窗口复用。"""
+    block_type = block.get("type")
+    if block_type == "annotation_proposal":
+        proposal = block.get("proposal") if isinstance(block.get("proposal"), dict) else {}
+        stats = proposal.get("stats") if isinstance(proposal.get("stats"), dict) else {}
+        succeeded = int(stats.get("succeeded") or 0)
+        total_boxes = int(stats.get("totalBoxes") or stats.get("total_boxes") or 0)
+        summary = str(proposal.get("summary") or "").strip()
+        if summary:
+            return summary
+        if succeeded:
+            hint = f"批量标注 {succeeded} 张"
+            if total_boxes:
+                hint += f" · {total_boxes} 框"
+            return hint
+        return "标注变更提案"
+    if block_type == "analysis_script_proposal":
+        explanation = str(block.get("explanation") or "").strip()
+        if explanation:
+            return f"[数据分析脚本] {explanation}"
+        script = str(block.get("script") or "").strip().splitlines()
+        first = script[0][:80] if script else ""
+        return f"[数据分析脚本] {first}" if first else "[数据分析脚本]"
+    if block_type == "document_proposal":
+        title = str(block.get("title") or "文档").strip()
+        content = str(block.get("content") or "").strip()
+        snippet = " ".join(content.split())[:120]
+        if snippet:
+            return f"[报告] {title}: {snippet}"
+        return f"[报告] {title}"
+    return None
+
+
+def _truncate_preview_line(line: str, *, max_len: int) -> str:
+    compact = " ".join(line.strip().split())
+    return f"{compact[:max_len]}…" if len(compact) > max_len else compact
+
+
 def blocks_to_text(blocks: list[dict[str, Any]]) -> str:
     parts: list[str] = []
     for block in blocks:
@@ -300,28 +439,22 @@ def blocks_to_text(blocks: list[dict[str, Any]]) -> str:
             content = str(block.get("content", "")).strip()
             if content:
                 parts.append(content)
+    if parts:
+        return "\n".join(parts)
+    for block in blocks:
+        line = block_to_transcript_line(block)
+        if line:
+            parts.append(line)
     return "\n".join(parts)
 
 
 def blocks_to_preview(blocks: list[dict[str, Any]], *, max_len: int = 128) -> str:
     text = blocks_to_text(blocks)
     if text.strip():
-        line = " ".join(text.strip().split())
-        return f"{line[:max_len]}…" if len(line) > max_len else line
+        return _truncate_preview_line(text, max_len=max_len)
 
     for block in blocks:
-        if block.get("type") == "annotation_proposal":
-            proposal = block.get("proposal") if isinstance(block.get("proposal"), dict) else {}
-            stats = proposal.get("stats") if isinstance(proposal.get("stats"), dict) else {}
-            succeeded = int(stats.get("succeeded") or 0)
-            total_boxes = int(stats.get("totalBoxes") or stats.get("total_boxes") or 0)
-            summary = str(proposal.get("summary") or "").strip()
-            if summary:
-                line = " ".join(summary.split())
-                return f"{line[:max_len]}…" if len(line) > max_len else line
-            if succeeded:
-                hint = f"批量标注 {succeeded} 张"
-                if total_boxes:
-                    hint += f" · {total_boxes} 框"
-                return hint
+        line = block_to_transcript_line(block)
+        if line:
+            return _truncate_preview_line(line, max_len=max_len)
     return ""

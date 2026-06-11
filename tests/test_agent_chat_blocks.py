@@ -1,7 +1,9 @@
 from app.schemas.agent import StreamEventPayload
 from app.services.agent_chat_blocks import (
     apply_stream_event_to_blocks,
+    block_to_transcript_line,
     blocks_to_preview,
+    blocks_to_text,
     collapse_assistant_blocks,
     finalize_pipeline_steps_in_blocks,
 )
@@ -118,3 +120,36 @@ def test_worker_steps_upsert_by_image_path() -> None:
     by_path = {s["imagePath"]: s for s in worker_steps}
     assert by_path["a/1.jpg"]["detail"] == "映射 3 框"
     assert by_path["a/2.jpg"]["detail"] == "映射 5 框"
+
+
+def test_analysis_script_proposal_blocks_to_preview() -> None:
+    blocks = [
+        {
+            "type": "analysis_script_proposal",
+            "script": "label_counts = DATA['labelCounts']\nprint(label_counts)",
+            "explanation": "按标签统计数量",
+            "status": "pending",
+        },
+    ]
+    preview = blocks_to_preview(blocks)
+    assert "数据分析脚本" in preview
+    assert "按标签统计数量" in preview
+    assert blocks_to_text(blocks) == "[数据分析脚本] 按标签统计数量"
+
+
+def test_document_proposal_blocks_to_preview_without_text_block() -> None:
+    blocks = [
+        {
+            "type": "document_proposal",
+            "title": "标注质量报告",
+            "content": "# 标注质量报告\n\n## 摘要\n共 100 个框。",
+            "suggestedRelativePath": "reports/quality.md",
+            "status": "pending",
+        },
+    ]
+    line = block_to_transcript_line(blocks[0])
+    assert line is not None
+    assert line.startswith("[报告] 标注质量报告:")
+    preview = blocks_to_preview(blocks)
+    assert "标注质量报告" in preview
+    assert blocks_to_text(blocks).startswith("[报告]")

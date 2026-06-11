@@ -39,6 +39,23 @@ async def check_agent_stream_limit(redis: Redis, settings: Settings, user_id: UU
     )
 
 
+async def check_agent_analysis_limit(
+    redis: Redis,
+    settings: Settings,
+    user_id: UUID,
+) -> None:
+    uid = str(user_id)
+    limit = settings.agent_analysis_rate_limit_per_hour
+    if settings.is_development:
+        limit = max(limit, 100)
+    await _check_limit(
+        redis,
+        f"lr:ratelimit:agent:analysis:hour:{uid}",
+        limit=limit,
+        window_seconds=3600,
+    )
+
+
 async def check_agent_session_write_limit(
     redis: Redis,
     settings: Settings,

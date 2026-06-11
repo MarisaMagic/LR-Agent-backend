@@ -10,11 +10,12 @@ from app.agent.annotation import (
     heuristic_map_boxes,
     map_detection_boxes_to_labels_unified,
 )
+from app.agent.annotation.mutation_prepare_service import prepare_mutation_annotation
 from app.agent.annotation.debug_log import log_annotation_agent
 from app.agent.annotation.image_bytes_loader import load_image_bytes
 from app.agent.annotation.schemas import AnnotationScopePayload
 from app.agent.llm_factory import build_chat_model
-from app.agent.turn_context import build_turn_context
+from app.agent.conversation_context import load_conversation_transcript
 from app.core.deps import CurrentUser, DbSession, RedisClient, SettingsDep
 from app.services.agent_chat_repository import AgentChatRepository
 from app.schemas.annotation_agent import (
@@ -22,6 +23,7 @@ from app.schemas.annotation_agent import (
     HeuristicMapRequest,
     JudgeDetectionLabelsRequest,
     MapDetectionBoxesRequest,
+    MutationPrepareRequest,
 )
 from app.services.llm_provider_service import LlmProviderService
 
@@ -90,6 +92,64 @@ async def api_map_heuristic(
     return {"data": {"mappings": mappings, "method": "heuristic"}}
 
 
+@router.post("/mutation-prepare", summary="标注变更准备（改标签/删框，单次 LLM）")
+async def api_mutation_prepare(
+    body: MutationPrepareRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+    redis: RedisClient,
+    settings: SettingsDep,
+):
+    if not settings.agent_mutation_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="agent_mutation_disabled",
+        )
+    try:
+        llm = await _llm_for_provider(
+            db,
+            settings,
+            current_user.id,
+            body.provider_id,
+            temperature=settings.annotation_prepare_temperature,
+        )
+        label_names = None
+        if body.project is not None:
+            label_names = [
+                str(l.get("name") or "")
+                for l in (body.project.labels or [])
+                if str(l.get("name") or "").strip()
+            ]
+        repo = AgentChatRepository(db, redis, settings)
+        conversation_transcript = await load_conversation_transcript(
+            repo,
+            body.session_id,
+            user_id=current_user.id,
+            user_request=body.user_request,
+            max_turns_in_window=settings.agent_default_max_turns_in_window,
+        )
+
+        result = await prepare_mutation_annotation(
+            llm,
+            user_request=body.user_request,
+            current_relative_path=(body.current_relative_path or "").strip(),
+            candidates=[c.model_dump() for c in body.candidates],
+            label_names=label_names or [],
+            selected_annotation_ids=body.selected_annotation_ids or None,
+            conversation_transcript=conversation_transcript,
+        )
+        return {
+            "data": {
+                **result.model_dump(),
+                "resolved_user_request": body.user_request,
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _http_from_llm_error(exc) from exc
+
+
 @router.post("/batch-prepare", summary="批量准备（范围+计划，单次 LLM）")
 async def api_batch_prepare(
     body: BatchPrepareRequest,
@@ -122,18 +182,17 @@ async def api_batch_prepare(
                 for l in (body.project.labels or [])
                 if str(l.get("name") or "").strip()
             ]
-        conversation_transcript = ""
         user_request = body.user_request
-        if body.session_id and not body.preselected_paths:
+        conversation_transcript = ""
+        if not body.preselected_paths:
             repo = AgentChatRepository(db, redis, settings)
-            turn = await build_turn_context(
+            conversation_transcript = await load_conversation_transcript(
                 repo,
                 body.session_id,
                 user_id=current_user.id,
-                current_user_content=body.user_request,
+                user_request=body.user_request,
                 max_turns_in_window=settings.agent_default_max_turns_in_window,
             )
-            conversation_transcript = turn.transcript
 
         current_rel = (body.current_relative_path or "").strip()
         candidates = [c.model_dump() for c in body.candidates]

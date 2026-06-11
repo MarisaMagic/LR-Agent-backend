@@ -13,6 +13,8 @@ from app.schemas.agent import ClientContextInput
 def test_normalize_turn_kind_maps_wants_batch_to_execute():
     assert _normalize_turn_kind("wants_batch") == "execute_batch"
     assert _normalize_turn_kind("execute_batch") == "execute_batch"
+    assert _normalize_turn_kind("mutate_annotation") == "mutate_annotation"
+    assert _normalize_turn_kind("analyze_data") == "analyze_data"
     assert _normalize_turn_kind("unknown") == "converse"
 
 
@@ -47,3 +49,28 @@ async def test_understand_turn_llm_only():
     assert result.turn_kind == "execute_batch"
     assert len(result.referenced_relative_paths) == 2
     assert result.reason == "llm"
+
+
+def test_turn_understanding_llm_result_coerces_null_scope_notes():
+    parsed = TurnUnderstandingLlmResult.model_validate(
+        {
+            "resolved_user_content": "删除 2.jpg 中的标注",
+            "turn_kind": "mutate_annotation",
+            "task_intent": "mutate_annotation",
+            "referenced_relative_paths": ["2.jpg"],
+            "scope_notes": None,
+            "reason": "用户指定图片",
+        }
+    )
+    assert parsed.scope_notes == ""
+    assert parsed.reason == "用户指定图片"
+    assert parsed.turn_kind == "mutate_annotation"
+
+
+def test_coerce_null_string_fields():
+    from app.agent.annotation.llm_invoke import coerce_null_string_fields
+
+    data = {"scope_notes": None, "reason": "ok", "turn_kind": "analyze_data"}
+    fixed = coerce_null_string_fields(data, "scope_notes", "reason")
+    assert fixed["scope_notes"] == ""
+    assert fixed["reason"] == "ok"

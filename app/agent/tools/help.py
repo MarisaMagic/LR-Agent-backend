@@ -9,8 +9,8 @@ LR_AGENT_HELP = """# LR-Agent 功能概览
 - **Agent 面板**：右侧对话助手，支持工具查询账户、读取文件与当前界面上下文
 
 **Ask 模式**：问答、查已有标注（read_file_annotation）、读文本/代码（read_workspace_file）、读文档（read_document_file）、看图（read_image_for_vision）；不写入标注文件。
-**Agent 模式**：描述批量范围后自动检测与提案；对话回合也可查标注与文件内容。
-执行批量写入标注请用 Agent 模式并给出明确图片范围；查某张图已有标注在 Ask 即可。"""
+**Agent 模式**：批量检测与提案；标注变更（改标签/删框）；数据分析（脚本预览后执行）；报告/文档（Markdown）。
+执行批量写入或变更标注请描述明确图片范围；查某张图已有标注在 Ask 即可。"""
 
 
 def get_lr_agent_help(topic: str | None = None) -> str:
