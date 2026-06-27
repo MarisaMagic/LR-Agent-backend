@@ -2,6 +2,27 @@ from typing import Any
 
 from app.schemas.agent import StreamEventPayload
 
+PERSISTABLE_STREAM_EVENT_TYPES = frozenset({
+    "text_delta",
+    "reasoning_delta",
+    "tool_start",
+    "tool_result",
+    "annotation_progress",
+    "annotation_proposal",
+    "analysis_script_proposal",
+    "file_proposal_start",
+    "file_proposal_delta",
+    "file_proposal",
+    "document_proposal",
+})
+
+PG_SYNC_STREAM_EVENT_TYPES = frozenset({
+    "annotation_proposal",
+    "analysis_script_proposal",
+    "file_proposal",
+    "document_proposal",
+})
+
 PIPELINE_IMAGE_DETAIL_STAGES = frozenset({"worker", "judge", "retry"})
 PIPELINE_RUNNING_DETAIL_TAIL = 5
 
@@ -327,7 +348,7 @@ def apply_stream_event_to_blocks(
         next_blocks.append(script_block)
         return next_blocks
 
-    if event.type == "document_proposal":
+    if event.type == "file_proposal" or event.type == "document_proposal":
         for i, block in enumerate(next_blocks):
             if (
                 block.get("type") == "annotation_pipeline"
@@ -347,14 +368,30 @@ def apply_stream_event_to_blocks(
                     ],
                 }
         doc_block = {
-            "type": "document_proposal",
-            "title": event.summary or "文档",
+            "type": "file_proposal",
+            "title": event.summary or "文件",
             "content": event.content or "",
             "suggestedRelativePath": event.image_path or "docs/document.md",
             "status": event.status or "pending",
         }
-        next_blocks = [b for b in next_blocks if b.get("type") != "document_proposal"]
-        next_blocks.append(doc_block)
+        # 按 suggestedRelativePath 去重更新，而非全量替换——支持同一消息中多个文件提案
+        path = doc_block["suggestedRelativePath"]
+        existing_idx = next(
+            (
+                i
+                for i, b in enumerate(next_blocks)
+                if b.get("type") in ("file_proposal", "document_proposal")
+                and b.get("suggestedRelativePath") == path
+            ),
+            -1,
+        )
+        if existing_idx >= 0:
+            existing_status = next_blocks[existing_idx].get("status")
+            if existing_status and existing_status != "pending":
+                doc_block["status"] = existing_status
+            next_blocks[existing_idx] = doc_block
+        else:
+            next_blocks.append(doc_block)
         return next_blocks
 
     return next_blocks
@@ -417,13 +454,13 @@ def block_to_transcript_line(block: dict[str, Any]) -> str | None:
         script = str(block.get("script") or "").strip().splitlines()
         first = script[0][:80] if script else ""
         return f"[数据分析脚本] {first}" if first else "[数据分析脚本]"
-    if block_type == "document_proposal":
-        title = str(block.get("title") or "文档").strip()
+    if block_type in ("file_proposal", "document_proposal"):
+        title = str(block.get("title") or "文件").strip()
         content = str(block.get("content") or "").strip()
         snippet = " ".join(content.split())[:120]
         if snippet:
-            return f"[报告] {title}: {snippet}"
-        return f"[报告] {title}"
+            return f"[文件] {title}: {snippet}"
+        return f"[文件] {title}"
     return None
 
 

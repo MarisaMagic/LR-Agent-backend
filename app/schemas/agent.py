@@ -90,6 +90,7 @@ class ClientContextInput(BaseModel):
     selected_annotation_ids: list[str] = Field(default_factory=list)
     annotation_project_snapshot: AnnotationProjectSnapshotInput | None = None
     turn_understanding: TurnUnderstandingResultSchema | None = None
+    mcp_server_url: str | None = None
 
 
 class TurnUnderstandRequest(BaseModel):
@@ -116,6 +117,14 @@ class TurnUnderstandResponse(BaseModel):
     user_visible_hint: str | None = None
 
 
+class ClientToolResult(BaseModel):
+    """客户端执行工具后返回的结果，随下一轮 /chat/stream 请求一并发送。"""
+
+    tool_call_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=128)
+    result: str = Field(description="工具执行结果（JSON 序列化字符串）")
+
+
 class ChatStreamRequest(BaseModel):
     provider_id: str = Field(min_length=1, max_length=64)
     session_id: str = Field(min_length=1, max_length=64)
@@ -130,6 +139,10 @@ class ChatStreamRequest(BaseModel):
     )
     context: ChatContextInput | None = None
     client_context: ClientContextInput | None = None
+    client_tool_results: list[ClientToolResult] = Field(
+        default_factory=list,
+        description="上一轮客户端工具执行结果，前端 resume 时携带",
+    )
 
 
 class AgentSessionCreateRequest(BaseModel):
@@ -228,7 +241,23 @@ class ChatCancelRequest(BaseModel):
     client_job_id: str = Field(min_length=1, max_length=64)
 
 
+class ClientToolCallPayload(BaseModel):
+    """client_tool_pending SSE 事件中单个客户端工具调用的描述。"""
+
+    tool_call_id: str
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
 class StreamEventPayload(BaseModel):
+    """SSE 流事件载荷。type 枚举：
+      text_delta / reasoning_delta / tool_start / tool_result /
+      preparing / context_updated / route_decided /
+      file_proposal_start / file_proposal_delta / document_proposal / file_proposal /
+      annotation_progress / annotation_proposal /
+      analysis_script_proposal / tool_pending / client_tool_pending / error / done
+    """
+
     type: str
     content: str | None = None
     stage: str | None = None
@@ -248,6 +277,8 @@ class StreamEventPayload(BaseModel):
     domain: str | None = None
     target: str | None = None
     reason: str | None = None
+    # client_tool_pending 专用字段
+    client_tool_calls: list[ClientToolCallPayload] | None = None
 
     @classmethod
     def from_client_dict(cls, data: dict[str, Any]) -> "StreamEventPayload":
@@ -261,7 +292,7 @@ class StreamEventPayload(BaseModel):
             message = data.get("error") or message
         image_path = data.get("imagePath") or data.get("image_path")
         summary = data.get("summary")
-        if event_type == "document_proposal":
+        if event_type in ("file_proposal_start", "document_proposal", "file_proposal"):
             content = data.get("content") or content
             detail = data.get("title") or detail
             image_path = data.get("suggestedRelativePath") or data.get("suggested_relative_path") or image_path
@@ -319,6 +350,23 @@ class StreamEventPayload(BaseModel):
             data["result"] = self.result
         if self.message is not None:
             data["message"] = self.message
+        if self.image_path is not None:
+            if self.type in ("file_proposal_start", "file_proposal_delta", "file_proposal", "document_proposal"):
+                data["suggestedRelativePath"] = self.image_path
+            else:
+                data["imagePath"] = self.image_path
+        if self.type in ("file_proposal_start", "file_proposal", "document_proposal"):
+            if self.summary is not None:
+                data["title"] = self.summary
+            if self.detail is not None and "title" not in data:
+                data["title"] = self.detail
+        if self.type == "analysis_script_proposal":
+            if self.content is not None:
+                data["script"] = self.content
+            if self.detail is not None:
+                data["explanation"] = self.detail
+            if self.message is not None:
+                data["error"] = self.message
         if self.mode is not None:
             data["mode"] = self.mode
         if self.domain is not None:
@@ -327,4 +375,15 @@ class StreamEventPayload(BaseModel):
             data["target"] = self.target
         if self.reason is not None:
             data["reason"] = self.reason
+        if self.client_tool_calls is not None:
+            serialized = [
+                {
+                    "toolCallId": c.tool_call_id,
+                    "name": c.name,
+                    "arguments": c.arguments,
+                }
+                for c in self.client_tool_calls
+            ]
+            data["clientToolCalls"] = serialized
+            data["toolCalls"] = serialized
         return data

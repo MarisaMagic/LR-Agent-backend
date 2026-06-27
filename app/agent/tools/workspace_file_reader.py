@@ -1,8 +1,9 @@
-"""工作区文件读取实现：文本/代码、文档（PDF/DOCX）、图片（视觉）。
+"""工作区文件读取与写入实现：文本/代码、文档（PDF/DOCX）、图片（视觉）、写文件提案。
 
-由 registry 注册为 LLM 工具；视觉相关辅助函数供 assist_service / assist_vision 使用：
+由 registry 注册为 LLM 工具；视觉与写文件相关辅助函数供 assist_service / assist_vision 使用：
   - extract_vision_path_from_tool_result：从工具结果提取图片绝对路径
   - format_vision_tool_result_for_display：隐藏内部路径标记后展示给用户
+  - extract_doc_proposal_from_tool_result：从写文件工具结果提取文档提案数据
 """
 
 from __future__ import annotations
@@ -12,13 +13,18 @@ from pathlib import Path
 
 from PIL import Image
 
-from app.agent.tools.workspace_path import resolve_workspace_file
+from app.agent.tools.tool_result import build_tool_result, format_tool_result_for_display
+from app.agent.tools.workspace_path import resolve_workspace_file, resolve_workspace_write_path
+from app.agent.tools.workspace_text_extensions import is_allowed_text_extension
 from app.core.config import Settings
 from app.schemas.agent import ClientContextInput
 
 VISION_TOOL_NAME = "read_image_for_vision"
+WRITE_TOOL_NAME = "write_workspace_file"
 # 工具结果 JSON 中的内部字段，assist_service 据此注入多模态消息
 VISION_PATH_MARKER = "__vision_image_path__"
+# 工具结果 JSON 中的内部字段，assist_service 据此发出 file_proposal SSE 事件
+DOC_PROPOSAL_MARKER = "__doc_proposal__"
 
 # 禁止用 read_workspace_file 读取的二进制/专用格式
 TEXT_BLOCKLIST_SUFFIXES = frozenset(
@@ -251,3 +257,91 @@ def format_vision_tool_result_for_display(result_text: str) -> str:
     display = dict(data)
     display.pop(VISION_PATH_MARKER, None)
     return json.dumps(display, ensure_ascii=False, indent=2)
+
+
+def write_workspace_file_tool(
+    client_context: ClientContextInput | None,
+    relative_path: str,
+    content: str,
+) -> str:
+    """准备写文件提案：校验路径后返回 file_proposal 标记供 assist_service 转换为 SSE 事件。
+
+    不直接写盘——写操作由前端在用户确认后执行。
+    """
+    resolved, err = resolve_workspace_write_path(client_context, relative_path)
+    if resolved is None:
+        return build_tool_result(
+            ok=False,
+            tool=WRITE_TOOL_NAME,
+            status="error",
+            summary=f"无法写入文件：{err}",
+        )
+
+    from app.agent.tools.workspace_path import allowed_roots
+    rel_display = relative_path.strip()
+    roots = allowed_roots(client_context)
+    for root in roots:
+        try:
+            rel_display = str(resolved.relative_to(root)).replace("\\", "/")
+            break
+        except ValueError:
+            continue
+
+    suffix = resolved.suffix.lower()
+    if not is_allowed_text_extension(suffix):
+        return build_tool_result(
+            ok=False,
+            tool=WRITE_TOOL_NAME,
+            status="error",
+            summary=(
+                f"write_workspace_file 不支持后缀 {suffix!r}。"
+                f"请使用常见文本/代码格式（如 .md .txt .json .py .cpp .ts 等）。"
+            ),
+        )
+
+    title = resolved.stem.replace("-", " ").replace("_", " ").title()
+    summary = (
+        f"已生成文件提案：{rel_display}。"
+        "文件尚未写入磁盘；用户确认（Keep All）后才会落盘。"
+        "请勿在回复中声称文件已创建或已保存。"
+    )
+    return build_tool_result(
+        ok=True,
+        tool=WRITE_TOOL_NAME,
+        status="proposal_ready",
+        summary=summary,
+        file_written=False,
+        proposal_pending=True,
+        **{
+            DOC_PROPOSAL_MARKER: True,
+            "relative_path": rel_display,
+            "title": title,
+            "content": content,
+        },
+    )
+
+
+def extract_doc_proposal_from_tool_result(
+    tool_name: str, result_text: str
+) -> dict | None:
+    """从 write_workspace_file 工具结果中提取文档提案数据。
+
+    返回 {"relative_path": ..., "title": ..., "content": ...} 或 None。
+    """
+    if tool_name != WRITE_TOOL_NAME:
+        return None
+    try:
+        data = json.loads(result_text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or not data.get(DOC_PROPOSAL_MARKER):
+        return None
+    return {
+        "relative_path": str(data.get("relative_path") or "document.md"),
+        "title": str(data.get("title") or "文档"),
+        "content": str(data.get("content") or ""),
+    }
+
+
+def format_write_tool_result_for_display(result_text: str) -> str:
+    return format_tool_result_for_display(result_text)

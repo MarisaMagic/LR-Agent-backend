@@ -101,3 +101,45 @@ def resolve_workspace_file(
         if candidate.is_file():
             return candidate, ""
     return None, f"未找到文件：{rel}"
+
+
+def resolve_workspace_write_path(
+    client_context: ClientContextInput | None,
+    path: str,
+) -> tuple[Path | None, str]:
+    """解析并校验写文件目标路径，返回 (绝对路径, 错误信息)。
+
+    与 resolve_workspace_file 的差异：目标文件不要求已存在，仅校验：
+    - 路径在 allowed_roots 内
+    - 无 .. 目录穿越
+    - 父目录不存在时由前端/Electron ensureDir 自动创建
+    """
+    raw = (path or "").strip()
+    if not raw:
+        return None, "请提供写入目标的相对路径（如 reports/summary.md）。"
+
+    roots = allowed_roots(client_context)
+    if not roots:
+        return None, "未绑定工作区或项目目录，无法写入本地文件。"
+
+    candidate_input = Path(raw)
+    if candidate_input.is_absolute():
+        try:
+            candidate = candidate_input.resolve()
+        except OSError as exc:
+            return None, f"路径无效：{exc}"
+        for root in roots:
+            if _is_under_root(candidate, root):
+                return candidate, ""
+        return None, "目标路径不在当前工作区或项目目录内。"
+
+    rel = normalize_relative_path(raw)
+    if ".." in rel.split("/"):
+        return None, "路径不能包含 .."
+
+    for root in roots:
+        candidate = (root / rel).resolve()
+        if not _is_under_root(candidate, root):
+            continue
+        return candidate, ""
+    return None, f"无法解析写入路径：{rel}"

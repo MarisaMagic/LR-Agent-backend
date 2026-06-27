@@ -1,9 +1,10 @@
-"""Assist 模式只读工具注册表。
+"""Assist 模式工具注册表。
 
 由 orchestrator 调用 build_tools_p1 构建工具列表，assist_service 通过 tool_fn_map 按名称执行。
-工具分两类：
+工具分三类：
   - 上下文查询：账户、帮助、界面状态、标注项目快照
-  - 文件读取：文本/代码、文档、图片（视觉）、已有标注 JSON
+  - 文件读取/写入：文本/代码、文档、图片（视觉）、已有标注 JSON、写文件提案
+  - 异步工具（ASYNC_TOOL_NAMES）：由前端 Electron 执行；调度器发出 tool_pending SSE 并暂停 loop
 """
 
 import json
@@ -11,6 +12,9 @@ from collections.abc import Callable
 from typing import Any
 
 from langchain_core.tools import StructuredTool
+
+# 客户端工具名称集合（向后兼容）：由 tool_registry_meta 统一定义
+from app.agent.tools.tool_registry_meta import ASYNC_TOOL_NAMES, CLIENT_TOOL_NAMES
 
 from app.agent.annotation.annotation_doc_reader import read_file_annotation_doc
 from app.agent.context_helpers import project_directory
@@ -20,10 +24,20 @@ from app.agent.tools.workspace_file_reader import (
     read_document_file,
     read_image_for_vision_tool,
     read_workspace_text_file,
+    write_workspace_file_tool,
 )
 from app.core.config import Settings
 from app.models.user import User
 from app.schemas.agent import ClientContextInput
+
+
+def _client_tool_stub(tool_name: str) -> StructuredTool:
+    """返回一个客户端工具的 schema 存根（func 不会被本地调用）。"""
+    # assist_service 在执行工具前会先检测 CLIENT_TOOL_NAMES，拦截并发出 client_tool_pending
+    def _unreachable(**_kwargs: object) -> str:  # noqa: ANN001
+        return f"[{tool_name}] 此工具应由前端执行，本地调用不应发生。"
+    _unreachable.__name__ = tool_name
+    return _unreachable
 
 
 def build_tools_p1(
@@ -33,7 +47,7 @@ def build_tools_p1(
     settings: Settings,
     provider_is_vision: bool = False,
 ) -> list[StructuredTool]:
-    """构建 Phase 1 只读工具集，闭包绑定 user / client_context / settings。"""
+    """构建工具集：只读工具 + 写文件提案工具 + 客户端工具 schema 存根。"""
     def account_summary() -> str:
         verified = "已验证" if user.email_verified else "未验证"
         name = user.display_name or user.username or "未设置"
@@ -99,7 +113,10 @@ def build_tools_p1(
     def read_document(relative_path: str = "") -> str:
         return read_document_file(client_context, relative_path, settings=settings)
 
-    # Phase 1 只读工具集
+    def write_file(relative_path: str, content: str) -> str:
+        return write_workspace_file_tool(client_context, relative_path, content)
+
+    # Phase 1 工具集（只读 + 写文件提案）
     return [
         StructuredTool.from_function(
             func=account_summary,
@@ -152,6 +169,52 @@ def build_tools_p1(
             description=(
                 "提取 PDF 或 DOCX 文档正文。"
                 "relative_path 为空时使用当前打开的文件。"
+            ),
+        ),
+        StructuredTool.from_function(
+            func=write_file,
+            name="write_workspace_file",
+            description=(
+                "在工作区内创建或覆写文本/代码文件。"
+                "支持 .md .txt .json .yaml .py .cpp .ts 等格式；父目录不存在时会自动创建。"
+                "调用后生成 file_proposal，用户点击 Keep All 后才实际写盘。"
+                "relative_path 示例：reports/summary.md、src/dijkstra.cpp。"
+                "content 为完整文件内容。"
+                "未成功调用本工具前，禁止在回复中声称文件已写入。"
+            ),
+        ),
+        # ── 客户端工具（schema 存根，实现体在前端 Electron 进程）────────────
+        StructuredTool.from_function(
+            func=_client_tool_stub("execute_batch_annotation"),
+            name="execute_batch_annotation",
+            description=(
+                "【客户端工具】对标注项目中的图片批量运行目标检测并自动标注。"
+                "前端将启动 YOLO 推理 → 标签映射 → 生成标注提案等完整流水线。"
+                "调用前不要 read_image_for_vision。"
+                "user_request：必须原样传递用户原话（如「标注 data 文件夹下所有图片」），"
+                "不要改写为单张路径，不要自行指定标签 ID。"
+                "scope_hint（可选）：范围补充说明（如「仅限子目录 train/」）。"
+                "必须发起真实 tool call，正文伪代码无效。"
+            ),
+        ),
+        StructuredTool.from_function(
+            func=_client_tool_stub("mutate_annotation"),
+            name="mutate_annotation",
+            description=(
+                "【客户端工具】修改或删除项目中已有的标注框（改标签、删框、批量纠错）。"
+                "不包含新增检测框；如需新增请使用 execute_batch_annotation。"
+                "user_request：用户原始请求（如「把所有 dog 标签改为 puppy」）。"
+                "调用后前端生成变更提案，用户确认后执行写入。"
+            ),
+        ),
+        StructuredTool.from_function(
+            func=_client_tool_stub("analyze_data"),
+            name="analyze_data",
+            description=(
+                "【客户端工具】对当前标注项目的标注数据进行统计或分布分析。"
+                "前端将生成 Python 分析脚本并在沙箱中执行，返回统计结果（图表/表格）。"
+                "user_request：分析需求（如「各类别标注数量分布」「IoU 分布直方图」）。"
+                "建议先调用此工具获取数据，再结合 write_workspace_file 写入报告或导出文件。"
             ),
         ),
     ]

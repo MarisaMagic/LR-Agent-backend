@@ -1,47 +1,58 @@
-"""Assist 模式系统提示词组装：运行时身份、任务指令与客户端上下文快照。
-
-由 orchestrator 在 assist 路由下调用，组装顺序：
-  1. 运行时身份块（模型 ID、视觉能力探针结果）
-  2. 任务指令模板（工具纪律、视觉规则、文件读取指引）
-  3. 可选上下文（标注项目快照 / 工作区路径 / 当前打开文件）
-"""
+"""Assist 模式系统提示词组装：运行时身份、任务指令与客户端上下文快照。"""
 
 from __future__ import annotations
 
 from app.schemas.agent import AnnotationProjectSnapshotInput, ClientContextInput
 
-# 工具调用行为规范：禁止口述「准备调工具」，直接发起 tool call
+WRITE_TOOL_GUIDE = """【写文件工具 write_workspace_file】
+- 创建/覆写报告、文档、代码、配置：必须调用 `write_workspace_file`（relative_path + content）。
+- 支持常见文本与代码后缀（.md .txt .json .yaml .py .cpp .ts 等）；父目录不存在时会自动创建。
+- 调用成功后仅生成 **待确认提案**；用户点击 Keep All 后才会写入磁盘。
+- **严禁幻觉**：未成功调用 write_workspace_file，或 ToolMessage 未返回提案成功信息时，禁止声称「已保存」「已写入」「文件在 xxx 路径」。
+- 复合任务（如先分析/标注再写报告）：客户端工具完成后，若仍需落盘，必须继续调用 write_workspace_file，然后再做文字总结。"""
+
 TOOL_DISCIPLINE = """【工具与回复顺序】
-- 需要工具时：直接发起 tool call，禁止先输出「请稍等」「我将调用…」等口述；最终答案在工具完成（及可能的附图注入）之后输出。
-- 用户只会看到：工具块（可折叠）→ 你的正文回答；不要把「准备调工具」当作最终回复。"""
+- 需要工具时：直接发起 tool call，禁止先输出「请稍等」「我将调用…」等口述。
+- 禁止在正文中写 `execute_batch_annotation(...)` 等伪代码；必须发起真实 tool call。
+- 根据用户任务**自行选择**合适工具：写文件/代码用 write_workspace_file；批量标注用 execute_batch_annotation；改标用 mutate_annotation；统计分析用 analyze_data。
+- 不要在不相关的任务上调用 execute_batch_annotation（例如写报告、写算法代码、创建文件夹）。"""
 
-# 视觉与标注工具的选择规则
 VISION_RULES = """【图片与标注】
-- 用户问图中视觉内容（人数、物体、场景、文字 OCR、外观、「是谁」且需看像素等）：使用 `read_image_for_vision`；成功后系统注入附图，再根据图像回答。不要用 `read_file_annotation` 代替。
-- 仅当用户明确问「标注 JSON/文件里标了谁、有哪些框」时：使用 `read_file_annotation`。
-- `read_image_for_vision` 的 relative_path 为空时使用当前打开的图片；用户给出如 data/1.jpg 时传入该相对路径。"""
+- 看图描述（人数、物体、OCR 等）：`read_image_for_vision`。
+- 查已有标注 JSON：`read_file_annotation`。
+- 批量检测标注：`execute_batch_annotation`（仅当用户确实需要标注图片时）。"""
 
-# 仅有工作区、无标注项目时的任务模板
-WORKSPACE_ASSIST_TASK = """【任务】在 LR-Agent 系统内回答用户问题、按工具结果执行读文件等操作。
+EXECUTION_TOOL_GUIDE = """【客户端执行工具】（仅在与用户任务匹配时调用）
+- execute_batch_annotation：批量检测并标注图片；user_request 传用户原话。
+- mutate_annotation：修改/删除已有标注框。
+- analyze_data：对标注数据统计分析。
+- 以上工具与 write_workspace_file 可串联；全部必要步骤完成后再写最终总结。"""
+
+PLANNING_GUIDE = """【任务规划】
+- 复合任务可在 reasoning 中列简要步骤，然后对第一步发起真实 tool call。
+- 每一步等 ToolMessage 返回后再决定下一步；需要落盘时不得跳过 write_workspace_file。"""
+
+FILE_WRITE_INTEGRITY = """【文件写入诚信】
+- 只有 write_workspace_file 的 ToolMessage 明确表示提案已生成时，才可告知用户「请在上方变更列表中 Keep All 确认写入」。
+- 禁止编造文件路径、禁止展示「已写入磁盘」的虚假结论。"""
+
+WORKSPACE_ASSIST_TASK = """【任务】在 LR-Agent 内回答用户问题，并用工具完成读/写文件等操作。
 """ + TOOL_DISCIPLINE + """
-- 文本/代码： `read_workspace_file`
-- PDF/DOCX： `read_document_file`
+- 读文本/代码：`read_workspace_file`；PDF/DOCX：`read_document_file`
 """ + VISION_RULES + """
-- 路径参数为空时优先使用当前打开的文件
-- 用自然、简洁的中文回复；禁止在回复中带 [Ask]、[Agent] 等前缀
+""" + WRITE_TOOL_GUIDE + """
+""" + FILE_WRITE_INTEGRITY + """
+- 用自然、简洁的中文回复。"""
 
-可使用工具查询账户、应用说明与界面上下文。"""
-
-# 已打开标注项目时的任务模板（含批量检测路由约束）
-ASSISTANT_TASK_BASE = """【任务】在 LR-Agent 系统内回答用户问题、按工具与路由执行相关操作；当前已打开标注项目。
+ASSISTANT_TASK_BASE = """【任务】在 LR-Agent 内完成问答、标注、分析、写文件等任务。
 """ + TOOL_DISCIPLINE + """
-- 标注策略、标签含义、项目结构：结合项目快照与工具回答
+""" + PLANNING_GUIDE + """
 """ + VISION_RULES + """
-- 文本/代码： `read_workspace_file`；PDF/DOCX： `read_document_file`
-- 【回合理解】路由为 execute_batch 时，批量检测与写入由客户端执行；本条对话中勿声称已完成检测或写入标注文件
-- 用自然、简洁的中文回复；禁止在回复中带 [Ask]、[Agent]、「助手:」等前缀
-
-可使用工具查询账户、应用说明、界面上下文、文件内容与单文件标注。"""
+- 读文本/代码：`read_workspace_file`；PDF/DOCX：`read_document_file`
+""" + EXECUTION_TOOL_GUIDE + """
+""" + WRITE_TOOL_GUIDE + """
+""" + FILE_WRITE_INTEGRITY + """
+- 用自然、简洁的中文回复。"""
 
 
 def format_runtime_identity_block(
@@ -50,7 +61,6 @@ def format_runtime_identity_block(
     provider_label: str = "",
     supports_vision: bool = False,
 ) -> str:
-    """生成【你的身份】块：告知模型自身 ID、视觉能力探针结果与系统边界。"""
     label = provider_label.strip() or "（未命名提供商）"
     if supports_vision:
         vision_line = "视觉能力：已通过 API 探针，可调用 read_image_for_vision 并在调用后查看附图。"
@@ -68,7 +78,6 @@ def format_runtime_identity_block(
 
 
 def format_snapshot_for_prompt(snapshot: AnnotationProjectSnapshotInput) -> str:
-    """将标注项目快照格式化为提示词可读文本（标签、检测模型等）。"""
     labels = snapshot.labels or []
     label_lines = [
         f"- {item.get('id', '')}: {item.get('name', '')}"
@@ -97,7 +106,6 @@ def format_snapshot_for_prompt(snapshot: AnnotationProjectSnapshotInput) -> str:
 
 
 def build_workspace_assistant_system_prompt(client_context: ClientContextInput | None) -> str:
-    """工作区 assist 提示词：任务模板 + 工作区根目录与当前打开文件。"""
     if client_context is None:
         return WORKSPACE_ASSIST_TASK
     parts = [WORKSPACE_ASSIST_TASK]
@@ -109,7 +117,6 @@ def build_workspace_assistant_system_prompt(client_context: ClientContextInput |
 
 
 def build_project_assistant_system_prompt(client_context: ClientContextInput | None) -> str:
-    """标注项目 assist 提示词：任务模板 + 项目快照。"""
     if client_context is None or client_context.annotation_project_snapshot is None:
         return ASSISTANT_TASK_BASE
     snap = client_context.annotation_project_snapshot
@@ -120,26 +127,20 @@ def build_project_assistant_system_prompt(client_context: ClientContextInput | N
 
 
 def format_turn_task_addon(client_context: ClientContextInput | None) -> str:
-    """按回合理解 task_intent / turn_kind 追加任务模板。"""
+    """注入回合理解 LLM 的路由结论（reason / turn_kind），非用户关键词规则。"""
     if client_context is None or client_context.turn_understanding is None:
         return ""
     tu = client_context.turn_understanding
-    kind = tu.turn_kind or tu.task_intent
-    if kind == "generate_report":
-        return (
-            "\n【本轮任务：生成报告】\n"
-            "请用 Markdown 撰写数据分析或标注质量报告；先通过工具收集标注/项目信息，"
-            "结构含摘要、统计、发现与建议；勿声称已写入文件。"
-        )
-    if kind == "generate_document":
-        return (
-            "\n【本轮任务：生成说明文档】\n"
-            "请用 Markdown 撰写项目说明或标注规范文档；结合项目快照与工具读取结果；"
-            "条理清晰，适合保存为 .md 文件。"
-        )
-    if kind in ("query_annotation", "converse") and tu.task_intent == "query_annotation":
-        return "\n【本轮侧重】查询已有标注 JSON，优先 read_file_annotation。"
-    return ""
+    parts: list[str] = []
+    if (tu.reason or "").strip():
+        parts.append(f"路由依据：{tu.reason.strip()}")
+    if (tu.turn_kind or "").strip():
+        parts.append(f"turn_kind：{tu.turn_kind.strip()}")
+    if (tu.scope_notes or "").strip():
+        parts.append(f"范围：{tu.scope_notes.strip()}")
+    if not parts:
+        return ""
+    return "\n【回合理解】" + "；".join(parts)
 
 
 def build_assist_system_prompt(
@@ -149,7 +150,6 @@ def build_assist_system_prompt(
     provider_label: str = "",
     supports_vision: bool = False,
 ) -> str:
-    """组装完整 assist 系统提示词：身份块 + 按上下文选择任务模板。"""
     identity = format_runtime_identity_block(
         model=model,
         provider_label=provider_label,

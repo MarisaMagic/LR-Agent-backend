@@ -98,6 +98,46 @@ def build_lc_messages(
     return lc_messages, token_estimate, needs_summarize
 
 
+def append_client_tool_results_to_messages(
+    lc_messages: list,
+    client_tool_results: list,
+    *,
+    user_content: str = "",
+) -> list:
+    """Resume 时在消息链末尾追加 AIMessage(tool_calls) + ToolMessage 对（支持累积多轮）。"""
+    if not client_tool_results:
+        return lc_messages
+
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    for ctr in client_tool_results:
+        args: dict = {"user_request": user_content.strip()}
+        try:
+            import json
+
+            parsed = json.loads(ctr.result)
+            if isinstance(parsed, dict) and parsed.get("user_request"):
+                args["user_request"] = str(parsed["user_request"])
+        except Exception:
+            pass
+        lc_messages.append(
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": ctr.tool_call_id,
+                        "name": ctr.name,
+                        "args": args,
+                    },
+                ],
+            ),
+        )
+        lc_messages.append(
+            ToolMessage(content=ctr.result, tool_call_id=ctr.tool_call_id),
+        )
+    return lc_messages
+
+
 def messages_for_summary(messages: list[ChatMessageInput]) -> str:
     """将消息列表格式化为「用户/助手」对话文本，供摘要 LLM 使用。"""
     lines: list[str] = []

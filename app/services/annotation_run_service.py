@@ -66,6 +66,10 @@ class AnnotationRunService:
         except PermissionError as exc:
             raise ValueError("session_forbidden") from exc
 
+        await self.repo.replay_pending_events(
+            user.id, body.session_id, body.assistant_message_id,
+        )
+
         return {
             "session_id": body.session_id,
             "assistant_message_id": body.assistant_message_id,
@@ -78,7 +82,19 @@ class AnnotationRunService:
     ) -> dict[str, bool]:
         session_row = await self.repo.get_session_for_user(user.id, body.session_id)
         if session_row is None:
-            raise ValueError("session_not_found")
+            filtered: list[dict[str, Any]] = []
+            for raw in body.events:
+                if not isinstance(raw, dict):
+                    continue
+                event_type = str(raw.get("type") or "")
+                if event_type in ("done", "error", "preparing", "route_decided", "context_updated"):
+                    continue
+                filtered.append(raw)
+            if filtered:
+                await self.repo.cache_pending_events(
+                    user.id, body.session_id, body.assistant_message_id, filtered,
+                )
+            return {"ok": True, "pending": True}
 
         if not await self.repo.try_advance_event_seq(user.id, body.client_job_id, body.seq):
             return {"ok": True, "duplicate": True}

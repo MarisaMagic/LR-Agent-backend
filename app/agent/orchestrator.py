@@ -3,7 +3,7 @@
 编排流程概览：
   1. 校验 LLM 提供商 → 注册客户端任务 → 构建模型实例
   2. 同步上下文、准备本轮消息 → 构建轮次上下文窗口
-  3. 探测视觉能力 → 组装系统提示词 → 轮次理解（可选）
+  3. 探测视觉能力 → 组装系统提示词
   4. 构建 LangChain 消息 → 按需压缩历史摘要
   5. 路由到 assist（工具调用）或 chat（纯对话）并流式输出
   6. 持久化流事件 → 落库助手消息终态
@@ -24,15 +24,12 @@ from app.agent.context_snapshot import (
 )
 from app.agent.llm_factory import build_chat_model
 from app.agent.turn_context import build_turn_context_from_messages, turn_context_to_chat_inputs
-from app.agent.turn_understanding_service import (
-    TurnUnderstandingResult,
-    format_understanding_for_system_prompt,
-    understand_turn,
-)
+from app.agent.tools.mcp_client import load_mcp_tools_from_server
 from app.agent.tools.registry import build_tools_p1
 from app.core.config import Settings
 from app.models.user import User
 from app.schemas.agent import ChatContextInput, ChatStreamRequest, StreamEventPayload
+from app.services.agent_chat_blocks import PERSISTABLE_STREAM_EVENT_TYPES
 from app.services.agent_chat_repository import AgentChatRepository
 from app.services.agent_job_service import AgentJobService
 from app.services.llm_provider_service import LlmProviderService
@@ -110,6 +107,10 @@ class ChatOrchestrator:
             yield StreamEventPayload(type="error", message="prepare_turn_failed")
             return
 
+        await self.repo.replay_pending_events(
+            user.id, req.session_id, assistant_id,
+        )
+
         # 裁剪对话窗口，排除尚未完成的助手占位消息
         turn_ctx = build_turn_context_from_messages(
             chat_inputs,
@@ -170,45 +171,6 @@ class ChatOrchestrator:
         else:
             system_prompt = f"{identity}\n\n{CHAT_SYSTEM_PROMPT}"
 
-        # ── 阶段 5：轮次理解（解析意图、引用路径等）──────────────────────
-        understanding: TurnUnderstandingResult | None = None
-        if client_ctx and client_ctx.turn_understanding is not None:
-            # 客户端已预计算理解结果，直接复用
-            tu = client_ctx.turn_understanding
-            understanding = TurnUnderstandingResult(
-                resolved_user_content=tu.resolved_user_content or req.user_content,
-                referenced_relative_paths=list(tu.referenced_relative_paths or []),
-                resolved_active_relative_path=tu.resolved_active_relative_path,
-                task_intent=tu.task_intent or "converse",
-                turn_kind=tu.turn_kind,
-                needs_vision_input=bool(tu.needs_vision_input),
-                confidence=float(tu.confidence),
-                scope_notes=tu.scope_notes or "",
-                reason=tu.reason or "client",
-                user_visible_hint=tu.user_visible_hint,
-            )
-        elif has_assist_tools and not await cancelled():
-            # assist 模式下由服务端 LLM 补充理解
-            try:
-                understanding = await understand_turn(
-                    llm,
-                    user_content=req.user_content,
-                    client_context=client_ctx,
-                    conversation_transcript=turn_ctx.transcript,
-                    provider_is_vision=provider_is_vision,
-                )
-            except Exception:
-                logger.exception(
-                    "turn understand failed session=%s user=%s",
-                    req.session_id,
-                    user.id,
-                )
-
-        if understanding is not None:
-            system_prompt = (
-                f"{system_prompt}\n\n{format_understanding_for_system_prompt(understanding)}"
-            )
-
         # ── 阶段 6：构建 LangChain 消息，评估是否需要压缩 ─────────────────
         lc_messages, token_estimate, needs_summarize = build_lc_messages(
             req,
@@ -218,6 +180,8 @@ class ChatOrchestrator:
 
         final_status = "done"
         error_message: str | None = None
+        client_tool_pending_emitted = False
+        tool_pending_emitted = False
 
         try:
             # 上下文超长时先压缩历史，再重新构建消息
@@ -267,6 +231,19 @@ class ChatOrchestrator:
                     settings=self.settings,
                     provider_is_vision=provider_is_vision,
                 )
+                # ── MCP 工具动态注入（Phase 3）─────────────────────────────
+                mcp_url = (
+                    (req.client_context.mcp_server_url or "").strip()
+                    if req.client_context
+                    else ""
+                )
+                if mcp_url:
+                    mcp_tools = await load_mcp_tools_from_server(mcp_url)
+                    if mcp_tools:
+                        existing = {t.name for t in tools}
+                        tools = tools + [
+                            t for t in mcp_tools if t.name not in existing
+                        ]
                 stream = assist_service.stream_assist(
                     llm,
                     lc_messages,
@@ -275,12 +252,9 @@ class ChatOrchestrator:
                     max_tool_rounds=self.settings.agent_max_tool_rounds,
                     is_cancelled=cancelled,
                     provider_is_vision=provider_is_vision,
-                    needs_vision_input=bool(
-                        understanding and understanding.needs_vision_input
-                    ),
                     client_context=client_ctx,
-                    understanding=understanding,
                     user_content=req.user_content,
+                    client_tool_results=req.client_tool_results or None,
                 )
             else:
                 stream = chat_service.stream_chat(llm, lc_messages)
@@ -292,10 +266,16 @@ class ChatOrchestrator:
                 stream,
                 is_cancelled=cancelled,
             ):
+                if event.type in ("client_tool_pending", "tool_pending"):
+                    client_tool_pending_emitted = True
+                    tool_pending_emitted = True
                 yield event
 
             if await cancelled():
                 final_status = "stopped"
+            elif client_tool_pending_emitted or tool_pending_emitted:
+                # 前端将 resume，保留消息为 streaming 态（等待 resume 后再 finalize）
+                final_status = "streaming"
         except Exception:
             final_status = "error"
             error_message = "stream_failed"
@@ -305,15 +285,19 @@ class ChatOrchestrator:
             # ── 阶段 8：落库助手消息终态 ────────────────────────────────────
             if await cancelled() and final_status == "done":
                 final_status = "stopped"
-            await self.repo.finalize_assistant_message(
-                user.id,
-                req.session_id,
-                assistant_id,
-                status=final_status,
-                error=error_message,
-            )
+            # client_tool_pending 时保留 streaming 态，等前端 resume 后再 finalize
+            if final_status != "streaming":
+                await self.repo.finalize_assistant_message(
+                    user.id,
+                    req.session_id,
+                    assistant_id,
+                    status=final_status,
+                    error=error_message,
+                )
 
-        if not await cancelled() and final_status == "done":
+        if not await cancelled() and final_status == "done" and not (
+            client_tool_pending_emitted or tool_pending_emitted
+        ):
             yield StreamEventPayload(type="done")
 
     async def _persist_stream(
@@ -329,12 +313,7 @@ class ChatOrchestrator:
         async for event in source:
             if await is_cancelled():
                 return
-            if event.type in (
-                "text_delta",
-                "reasoning_delta",
-                "tool_start",
-                "tool_result",
-            ):
+            if event.type in PERSISTABLE_STREAM_EVENT_TYPES:
                 await self.repo.apply_stream_event(
                     user_id,
                     session_id,

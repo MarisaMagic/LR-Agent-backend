@@ -42,8 +42,8 @@ UNDERSTAND_SYSTEM = """你是 LR-Agent 回合理解与路由模块。根据 huma
    - execute_batch：需要启动标注流水线（检测、批量标注、补标、纠正遗漏等）。
    - mutate_annotation：修改或删除已有标注（改标签、删框、批量纠正标签；不含新增检测框）。
    - analyze_data：对标注或项目数据进行统计、分布、聚合分析（将执行 Python 脚本）。
-   - generate_report：生成数据分析或标注质量 Markdown 报告。
-   - generate_document：生成项目说明、标注规范等 Markdown 文档。
+   - generate_report：生成数据分析或标注质量报告（Agent 应通过 write_workspace_file 写入 .md）。
+   - generate_document：生成项目说明、标注规范等文档（Agent 应通过 write_workspace_file 写入 .md）。
    - converse：问答、解释、查已有标注 JSON、寒暄、需看图描述。
    - clarify_scope：与标注相关但图片范围仍不明确，需先追问。
    - unsupported：当前项目类型无法执行（极少）。

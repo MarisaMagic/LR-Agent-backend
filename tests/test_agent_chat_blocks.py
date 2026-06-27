@@ -137,6 +137,24 @@ def test_analysis_script_proposal_blocks_to_preview() -> None:
     assert blocks_to_text(blocks) == "[数据分析脚本] 按标签统计数量"
 
 
+def test_file_proposal_blocks_to_preview_without_text_block() -> None:
+    blocks = [
+        {
+            "type": "file_proposal",
+            "title": "标注质量报告",
+            "content": "# 标注质量报告\n\n## 摘要\n共 100 个框。",
+            "suggestedRelativePath": "reports/quality.md",
+            "status": "pending",
+        },
+    ]
+    line = block_to_transcript_line(blocks[0])
+    assert line is not None
+    assert line.startswith("[文件] 标注质量报告:")
+    preview = blocks_to_preview(blocks)
+    assert "标注质量报告" in preview
+    assert blocks_to_text(blocks).startswith("[文件]")
+
+
 def test_document_proposal_blocks_to_preview_without_text_block() -> None:
     blocks = [
         {
@@ -149,7 +167,38 @@ def test_document_proposal_blocks_to_preview_without_text_block() -> None:
     ]
     line = block_to_transcript_line(blocks[0])
     assert line is not None
-    assert line.startswith("[报告] 标注质量报告:")
-    preview = blocks_to_preview(blocks)
-    assert "标注质量报告" in preview
-    assert blocks_to_text(blocks).startswith("[报告]")
+    assert line.startswith("[文件] 标注质量报告:")
+
+
+def test_file_proposal_apply_stream_event() -> None:
+    blocks = apply_stream_event_to_blocks(
+        [],
+        StreamEventPayload(
+            type="file_proposal",
+            summary="数据报告",
+            content="# 报告\n\n完成。",
+            image_path="reports/summary.md",
+        ),
+    )
+    assert len(blocks) == 1
+    block = blocks[0]
+    assert block["type"] == "file_proposal"
+    assert block["title"] == "数据报告"
+    assert block["suggestedRelativePath"] == "reports/summary.md"
+    assert "报告" in block["content"]
+
+
+def test_file_proposal_to_sse_dict() -> None:
+    event = StreamEventPayload(
+        type="file_proposal",
+        summary="数据报告",
+        content="# 报告",
+        image_path="reports/summary.md",
+        status="pending",
+    )
+    data = event.to_sse_dict()
+    assert data["type"] == "file_proposal"
+    assert data["title"] == "数据报告"
+    assert data["content"] == "# 报告"
+    assert data["suggestedRelativePath"] == "reports/summary.md"
+    assert data["status"] == "pending"

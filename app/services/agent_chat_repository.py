@@ -1,3 +1,4 @@
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -21,6 +22,8 @@ from app.schemas.agent import (
     StreamEventPayload,
 )
 from app.services.agent_chat_blocks import (
+    PERSISTABLE_STREAM_EVENT_TYPES,
+    PG_SYNC_STREAM_EVENT_TYPES,
     apply_stream_event_to_blocks,
     blocks_to_preview,
     blocks_to_text,
@@ -132,12 +135,19 @@ class AgentChatRepository:
         page_rows = rows[:limit]
 
         summaries = await self._fetch_session_summaries([row.id for row in page_rows])
+        message_ids_map = await self._fetch_session_message_ids(
+            [row.id for row in page_rows],
+        )
         out: list[AgentSessionPublic] = []
         for row in page_rows:
             count, preview = summaries.get(row.id, (0, None))
             if count <= 0:
                 continue
-            out.append(self._row_to_session_summary_public(row, count, preview))
+            out.append(
+                self._row_to_session_summary_public(row, count, preview).model_copy(
+                    update={"message_ids": message_ids_map.get(row.id, [])},
+                ),
+            )
 
         next_cursor: str | None = None
         if has_more and page_rows:
@@ -170,8 +180,9 @@ class AgentChatRepository:
             summaries = await self._fetch_session_summaries([session_id])
             count, preview = summaries.get(session_id, (total_count, None))
 
+        all_msg_ids = await self._message_ids_from_db(session_id)
         session_public = self._row_to_session_summary_public(row, count, preview).model_copy(
-            update={"message_ids": [message.id for message in messages]},
+            update={"message_ids": all_msg_ids},
         )
         return AgentSessionDetailResponse(
             session=session_public,
@@ -232,7 +243,9 @@ class AgentChatRepository:
         await self._warm_session_meta(str(user_id), row, message_ids=msg_ids)
         summaries = await self._fetch_session_summaries([session_id])
         count, preview = summaries.get(session_id, (0, None))
-        return self._row_to_session_summary_public(row, count, preview)
+        return self._row_to_session_summary_public(row, count, preview).model_copy(
+            update={"message_ids": msg_ids},
+        )
 
     async def delete_session(self, user_id: uuid.UUID, session_id: str) -> bool:
         row = await self.get_session_for_user(user_id, session_id)
@@ -259,6 +272,7 @@ class AgentChatRepository:
         assistant_message_id: str,
         provider_model: str | None,
     ) -> tuple[list[ChatMessageInput], AgentSession]:
+        is_resume = bool(req.client_tool_results)
         row = await self.get_session_for_user(user_id, req.session_id)
         now = datetime.now(timezone.utc)
         title = _build_session_title(req.user_content)
@@ -336,6 +350,7 @@ class AgentChatRepository:
             provider_id=req.provider_id,
             model=provider_model,
             interaction_mode=msg_mode,
+            preserve_blocks=is_resume,
         )
 
         chat_inputs = await self.build_chat_message_inputs(req.session_id)
@@ -401,26 +416,19 @@ class AgentChatRepository:
         message_id: str,
         event: StreamEventPayload,
     ) -> None:
-        if event.type not in (
-            "text_delta",
-            "reasoning_delta",
-            "tool_start",
-            "tool_result",
-            "annotation_progress",
-            "annotation_proposal",
-            "analysis_script_proposal",
-            "document_proposal",
-        ):
+        if event.type not in PERSISTABLE_STREAM_EVENT_TYPES:
             return
 
         uid = str(user_id)
+        blocks: list[dict[str, Any]] | None = None
         cached = await self.cache.get_message(uid, message_id)
         if cached:
             blocks = apply_stream_event_to_blocks(cached.get("blocks", []), event)
             cached["blocks"] = blocks
             cached["updated_at_ms"] = int(datetime.now(timezone.utc).timestamp() * 1000)
             await self.cache.set_message(uid, session_id, cached)
-            return
+            if event.type not in PG_SYNC_STREAM_EVENT_TYPES:
+                return
 
         result = await self.db.execute(
             select(AgentMessage).where(AgentMessage.id == message_id),
@@ -428,7 +436,9 @@ class AgentChatRepository:
         row = result.scalar_one_or_none()
         if row is None:
             return
-        row.blocks_json = apply_stream_event_to_blocks(row.blocks_json, event)
+        if blocks is None:
+            blocks = apply_stream_event_to_blocks(row.blocks_json, event)
+        row.blocks_json = blocks
         row.updated_at = datetime.now(timezone.utc)
         await self.db.flush()
         await self.cache.set_message(uid, session_id, self._row_to_message_cache(row))
@@ -501,6 +511,46 @@ class AgentChatRepository:
     ) -> None:
         for event in events:
             await self.apply_stream_event(user_id, session_id, message_id, event)
+
+    async def cache_pending_events(
+        self,
+        user_id: uuid.UUID,
+        session_id: str,
+        assistant_message_id: str,
+        raw_events: list[dict[str, Any]],
+    ) -> None:
+        key = f"agent:u:{user_id}:pending-events:{session_id}:{assistant_message_id}"
+        pipe = self.cache.redis.pipeline()
+        for evt in raw_events:
+            pipe.rpush(key, json.dumps(evt, ensure_ascii=False))
+        pipe.expire(key, 60)
+        await pipe.execute()
+
+    async def replay_pending_events(
+        self,
+        user_id: uuid.UUID,
+        session_id: str,
+        assistant_message_id: str,
+    ) -> None:
+        key = f"agent:u:{user_id}:pending-events:{session_id}:{assistant_message_id}"
+        raw = await self.cache.redis.lrange(key, 0, -1)
+        if not raw:
+            return
+        await self.cache.redis.delete(key)
+        payloads: list[StreamEventPayload] = []
+        for entry in raw:
+            try:
+                d = json.loads(entry)
+            except json.JSONDecodeError:
+                continue
+            event_type = str(d.get("type") or "")
+            if event_type in ("done", "error", "preparing", "route_decided", "context_updated"):
+                continue
+            payloads.append(StreamEventPayload.from_client_dict(d))
+        if payloads:
+            await self.apply_stream_events_batch(
+                user_id, session_id, assistant_message_id, payloads,
+            )
 
     async def finalize_annotation_turn(
         self,
@@ -777,21 +827,24 @@ class AgentChatRepository:
         provider_id: str,
         model: str | None,
         interaction_mode: str | None = None,
+        preserve_blocks: bool = False,
     ) -> None:
         existing = await self.db.execute(
             select(AgentMessage.id).where(AgentMessage.id == message_id),
         )
         if existing.scalar_one_or_none() is not None:
+            values: dict = {
+                "status": "streaming",
+                "error": None,
+                "interaction_mode": interaction_mode,
+                "updated_at": datetime.now(timezone.utc),
+            }
+            if not preserve_blocks:
+                values["blocks_json"] = []
             await self.db.execute(
                 update(AgentMessage)
                 .where(AgentMessage.id == message_id)
-                .values(
-                    blocks_json=[],
-                    status="streaming",
-                    error=None,
-                    interaction_mode=interaction_mode,
-                    updated_at=datetime.now(timezone.utc),
-                ),
+                .values(**values),
             )
             await self.db.flush()
             return
@@ -943,6 +996,22 @@ class AgentChatRepository:
         out: dict[str, tuple[int, str | None]] = {}
         for sid in session_ids:
             out[sid] = (counts.get(sid, 0), previews.get(sid))
+        return out
+
+    async def _fetch_session_message_ids(
+        self,
+        session_ids: list[str],
+    ) -> dict[str, list[str]]:
+        if not session_ids:
+            return {}
+        result = await self.db.execute(
+            select(AgentMessage.session_id, AgentMessage.id)
+            .where(AgentMessage.session_id.in_(session_ids))
+            .order_by(AgentMessage.session_id, AgentMessage.sort_index.asc()),
+        )
+        out: dict[str, list[str]] = {sid: [] for sid in session_ids}
+        for sid, mid in result.all():
+            out.setdefault(sid, []).append(mid)
         return out
 
     async def _load_messages_page(
