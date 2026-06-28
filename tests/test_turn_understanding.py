@@ -51,6 +51,36 @@ async def test_understand_turn_llm_only():
     assert result.reason == "llm"
 
 
+@pytest.mark.asyncio
+async def test_understand_turn_editor_mode_downgrades_annotation():
+    mock_llm = AsyncMock()
+    mock_result = TurnUnderstandingLlmResult(
+        resolved_user_content="批量标注 data 目录",
+        referenced_relative_paths=["data/1.jpg"],
+        resolved_active_relative_path="data/1.jpg",
+        task_intent="execute_batch",
+        turn_kind="execute_batch",
+        needs_vision_input=False,
+        confidence=0.9,
+        scope_notes="",
+        reason="llm",
+    )
+
+    with patch(
+        "app.agent.turn_understanding_service.invoke_json_model",
+        new_callable=AsyncMock,
+        return_value=mock_result,
+    ):
+        result = await understand_turn(
+            mock_llm,
+            user_content="批量标注",
+            client_context=ClientContextInput(work_mode="editor"),
+        )
+
+    assert result.turn_kind == "converse"
+    assert result.task_intent == "converse"
+
+
 def test_turn_understanding_llm_result_coerces_null_scope_notes():
     parsed = TurnUnderstandingLlmResult.model_validate(
         {

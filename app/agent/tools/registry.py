@@ -30,6 +30,16 @@ from app.core.config import Settings
 from app.models.user import User
 from app.schemas.agent import ClientContextInput
 
+ANNOTATION_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "describe_annotation_project",
+        "read_file_annotation",
+        "execute_batch_annotation",
+        "mutate_annotation",
+        "analyze_data",
+    }
+)
+
 
 def _client_tool_stub(tool_name: str) -> StructuredTool:
     """返回一个客户端工具的 schema 存根（func 不会被本地调用）。"""
@@ -75,6 +85,8 @@ def build_tools_p1(
             parts.append(f"标注类型: {client_context.annotation_project_type}")
         if client_context.agent_mode:
             parts.append(f"交互模式: {client_context.agent_mode}")
+        if client_context.work_mode:
+            parts.append(f"工作模式: {client_context.work_mode}")
         if not parts:
             return "工作区已连接，但未打开具体文件或标注项目。"
         return "\n".join(parts)
@@ -117,7 +129,7 @@ def build_tools_p1(
         return write_workspace_file_tool(client_context, relative_path, content)
 
     # Phase 1 工具集（只读 + 写文件提案）
-    return [
+    tools = [
         StructuredTool.from_function(
             func=account_summary,
             name="get_account_summary",
@@ -218,6 +230,11 @@ def build_tools_p1(
             ),
         ),
     ]
+
+    if client_context and client_context.work_mode == "editor":
+        tools = [tool for tool in tools if tool.name not in ANNOTATION_TOOL_NAMES]
+
+    return tools
 
 
 def tool_fn_map(tools: list[StructuredTool]) -> dict[str, Callable[..., Any]]:

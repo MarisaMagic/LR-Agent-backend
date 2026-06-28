@@ -86,6 +86,7 @@ class ClientContextInput(BaseModel):
     annotation_project_modality: str | None = None
     annotation_project_type: str | None = None
     agent_mode: Literal["chat", "annotation"] | None = None
+    work_mode: Literal["editor", "annotation"] | None = None
     selected_annotation_id: str | None = None
     selected_annotation_ids: list[str] = Field(default_factory=list)
     annotation_project_snapshot: AnnotationProjectSnapshotInput | None = None

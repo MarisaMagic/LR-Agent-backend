@@ -199,6 +199,42 @@ def _llm_to_result(parsed: TurnUnderstandingLlmResult) -> TurnUnderstandingResul
     )
 
 
+_ANNOTATION_TURN_KINDS: frozenset[str] = frozenset(
+    {
+        "execute_batch",
+        "mutate_annotation",
+        "analyze_data",
+        "query_annotation",
+        "edit_annotation",
+        "delete_annotation",
+        "clarify_scope",
+        "wants_batch",
+    }
+)
+
+
+def _apply_editor_mode_guard(
+    result: TurnUnderstandingResult,
+    client_context: ClientContextInput | None,
+) -> TurnUnderstandingResult:
+    if not client_context or client_context.work_mode != "editor":
+        return result
+    if result.turn_kind not in _ANNOTATION_TURN_KINDS:
+        return result
+    return TurnUnderstandingResult(
+        resolved_user_content=result.resolved_user_content,
+        referenced_relative_paths=result.referenced_relative_paths,
+        resolved_active_relative_path=result.resolved_active_relative_path,
+        task_intent="converse",
+        turn_kind="converse",
+        needs_vision_input=result.needs_vision_input,
+        confidence=result.confidence,
+        scope_notes=result.scope_notes,
+        reason=f"{result.reason}; editor_mode_guard",
+        user_visible_hint=None,
+    )
+
+
 async def understand_turn(
     llm: ChatOpenAI,
     *,
@@ -224,6 +260,7 @@ async def understand_turn(
         null_string_fields=("scope_notes", "reason"),
     )
     result = _llm_to_result(parsed)
+    result = _apply_editor_mode_guard(result, client_context)
     logger.info(
         "[turn_understand] turn_kind=%s task_intent=%s paths=%s scope_notes=%r reason=%r",
         result.turn_kind,

@@ -155,12 +155,21 @@ def build_assist_system_prompt(
         provider_label=provider_label,
         supports_vision=supports_vision,
     )
-    if client_context and client_context.annotation_project_snapshot is not None:
+    if client_context and client_context.work_mode == "editor":
+        task = build_workspace_assistant_system_prompt(client_context)
+    elif client_context and client_context.annotation_project_snapshot is not None:
         task = build_project_assistant_system_prompt(client_context)
     elif client_context and (client_context.workspace_root or "").strip():
         task = build_workspace_assistant_system_prompt(client_context)
     else:
         task = WORKSPACE_ASSIST_TASK
     addon = format_turn_task_addon(client_context)
+    editor_note = ""
+    if client_context and client_context.work_mode == "editor":
+        editor_note = (
+            "\n【编辑器模式】当前为编辑器模式：禁止调用标注读写、批量标注、标注变更与标注数据分析相关工具；"
+            "可使用 read_workspace_file、write_workspace_file、read_document_file 等通用工具。"
+        )
     base = f"{identity}\n\n{task}"
-    return f"{base}\n{addon}" if addon else base
+    combined = f"{base}\n{addon}" if addon else base
+    return f"{combined}{editor_note}" if editor_note else combined
