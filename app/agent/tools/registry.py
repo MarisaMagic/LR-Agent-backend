@@ -14,7 +14,12 @@ from typing import Any
 from langchain_core.tools import StructuredTool
 
 # 客户端工具名称集合（向后兼容）：由 tool_registry_meta 统一定义
-from app.agent.tools.tool_registry_meta import ASYNC_TOOL_NAMES, CLIENT_TOOL_NAMES
+from app.agent.tools.tool_registry_meta import (
+    ASYNC_TOOL_NAMES,
+    CLIENT_TOOL_NAMES,
+    TOOL_CAPABILITY_MAP,
+    ToolCapability,
+)
 
 from app.agent.annotation.annotation_doc_reader import read_file_annotation_doc
 from app.agent.context_helpers import project_directory
@@ -43,7 +48,7 @@ ANNOTATION_TOOL_NAMES: frozenset[str] = frozenset(
 
 def _client_tool_stub(tool_name: str) -> StructuredTool:
     """返回一个客户端工具的 schema 存根（func 不会被本地调用）。"""
-    # assist_service 在执行工具前会先检测 CLIENT_TOOL_NAMES，拦截并发出 client_tool_pending
+    # assist_service 在执行工具前会先检测 CLIENT_TOOL_NAMES，拦截并发出 tool_pending
     def _unreachable(**_kwargs: object) -> str:  # noqa: ANN001
         return f"[{tool_name}] 此工具应由前端执行，本地调用不应发生。"
     _unreachable.__name__ = tool_name
@@ -51,6 +56,30 @@ def _client_tool_stub(tool_name: str) -> StructuredTool:
 
 
 def build_tools_p1(
+    user: User,
+    client_context: ClientContextInput | None,
+    *,
+    settings: Settings,
+    provider_is_vision: bool = False,
+) -> list[StructuredTool]:
+    """构建完整工具集（向后兼容别名）。"""
+    return _build_all_tools(user, client_context, settings=settings, provider_is_vision=provider_is_vision)
+
+
+def build_tools_by_name_set(
+    user: User,
+    client_context: ClientContextInput | None,
+    tool_set: frozenset[str],
+    *,
+    settings: Settings,
+    provider_is_vision: bool = False,
+) -> list[StructuredTool]:
+    """构建指定名称的工具子集（供 AssistModeRouter 使用）。"""
+    all_tools = _build_all_tools(user, client_context, settings=settings, provider_is_vision=provider_is_vision)
+    return [t for t in all_tools if t.name in tool_set]
+
+
+def _build_all_tools(
     user: User,
     client_context: ClientContextInput | None,
     *,
@@ -233,6 +262,18 @@ def build_tools_p1(
 
     if client_context and client_context.work_mode == "editor":
         tools = [tool for tool in tools if tool.name not in ANNOTATION_TOOL_NAMES]
+
+    # 断言：每个工具对应唯一 capability（防御 MCP 或 registry 错误注入同一能力多次）
+    _capability_seen: set[str] = set()
+    for t in tools:
+        cap = TOOL_CAPABILITY_MAP.get(t.name)
+        if cap is not None:
+            # QUERY_CONTEXT 允许多个工具（账户、帮助、上下文查询共享）
+            if cap != ToolCapability.QUERY_CONTEXT:
+                assert cap not in _capability_seen, (
+                    f"工具能力冲突: {t.name} 的能力 {cap.value} 已由另一工具提供"
+                )
+                _capability_seen.add(cap)
 
     return tools
 

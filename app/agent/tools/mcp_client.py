@@ -6,7 +6,7 @@ MCP Server 地址由客户端通过 client_context.mcp_server_url 字段传入�
 工具发现流程：
   1. 用 SSEConnection 连接 MCP Server
   2. 调用 load_mcp_tools() 获取所有工具
-  3. 返回 list[StructuredTool]，由 orchestrator 注入 build_tools_p1 列表
+  3. 按 ToolCapability 去重后返回 list[StructuredTool]（不与内置工具能力冲突）
 
 已知 MCP 工具（前端 server.ts 暴露）：
   - yolo_detect           本地 YOLO 推理
@@ -20,14 +20,38 @@ import logging
 
 from langchain_core.tools import StructuredTool
 
+from app.agent.tools.tool_registry_meta import (
+    CANONICAL_CAPABILITIES,
+    TOOL_CAPABILITY_MAP,
+    ToolCapability,
+)
+
 logger = logging.getLogger(__name__)
 
 
-async def load_mcp_tools_from_server(mcp_server_url: str) -> list[StructuredTool]:
-    """连接本地 MCP Server，动态发现并返回工具列表。
+def _infer_mcp_capability(tool_name: str) -> ToolCapability | None:
+    """从 MCP 工具名称推断其能力类型。"""
+    if tool_name in ("write_workspace_file",):
+        return ToolCapability.WRITE_FILE
+    if tool_name in ("yolo_detect",):
+        return ToolCapability.DETECT_BATCH
+    if tool_name in ("list_project_images",):
+        return ToolCapability.QUERY_CONTEXT
+    return None
+
+
+async def load_mcp_tools_from_server(
+    mcp_server_url: str,
+    *,
+    existing_capabilities: set[ToolCapability] | None = None,
+) -> list[StructuredTool]:
+    """连接本地 MCP Server，动态发现并按能力去重后返回工具列表。
 
     失败时返回空列表（不影响 Agent 正常运行）。
     """
+    if existing_capabilities is None:
+        existing_capabilities = CANONICAL_CAPABILITIES
+
     try:
         from langchain_mcp_adapters.client import MultiServerMCPClient
     except ImportError:
@@ -45,13 +69,25 @@ async def load_mcp_tools_from_server(mcp_server_url: str) -> list[StructuredTool
             }
         )
         tools = await client.get_tools()
+
+        # 按能力去重：跳过已有 canonical 实现的工具
+        filtered: list[StructuredTool] = []
+        skipped: list[str] = []
+        for t in tools:
+            cap = _infer_mcp_capability(t.name)
+            if cap is not None and cap in existing_capabilities:
+                skipped.append(t.name)
+                continue
+            filtered.append(t)
+
         logger.info(
-            "MCP: 已从 %s 加载 %d 个工具：%s",
+            "MCP: 已从 %s 加载 %d 个工具：%s (跳过: %s)",
             mcp_server_url,
-            len(tools),
-            [t.name for t in tools],
+            len(filtered),
+            [t.name for t in filtered],
+            skipped or ["无"],
         )
-        return list(tools)
+        return filtered
     except Exception as exc:
         logger.warning("MCP: 连接 %s 失败，跳过 MCP 工具加载：%s", mcp_server_url, exc)
         return []

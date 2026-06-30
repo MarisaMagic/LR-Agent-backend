@@ -1,58 +1,33 @@
-"""Assist 模式系统提示词组装：运行时身份、任务指令与客户端上下文快照。"""
+"""Assist 模式系统提示词组装：运行时身份、任务指令与客户端上下文快照。
+
+约束规则已移至 ToolGuard（程序化）和 AssistModeRouter（工具集裁剪），
+prompt 仅保留身份 + 任务简述，不再包含大段工具纪律文本。
+"""
 
 from __future__ import annotations
 
 from app.schemas.agent import AnnotationProjectSnapshotInput, ClientContextInput
 
-WRITE_TOOL_GUIDE = """【写文件工具 write_workspace_file】
-- 创建/覆写报告、文档、代码、配置：必须调用 `write_workspace_file`（relative_path + content）。
-- 支持常见文本与代码后缀（.md .txt .json .yaml .py .cpp .ts 等）；父目录不存在时会自动创建。
-- 调用成功后仅生成 **待确认提案**；用户点击 Keep All 后才会写入磁盘。
-- **严禁幻觉**：未成功调用 write_workspace_file，或 ToolMessage 未返回提案成功信息时，禁止声称「已保存」「已写入」「文件在 xxx 路径」。
-- 复合任务（如先分析/标注再写报告）：客户端工具完成后，若仍需落盘，必须继续调用 write_workspace_file，然后再做文字总结。"""
+# 精简后的 prompt 常量 —— 规则由代码层承担，不靠模型理解
+VISION_HINT = """- 看图描述：按需调用 read_image_for_vision。
+- 查已有标注 JSON：read_file_annotation。"""
 
-TOOL_DISCIPLINE = """【工具与回复顺序】
-- 需要工具时：直接发起 tool call，禁止先输出「请稍等」「我将调用…」等口述。
-- 禁止在正文中写 `execute_batch_annotation(...)` 等伪代码；必须发起真实 tool call。
-- 根据用户任务**自行选择**合适工具：写文件/代码用 write_workspace_file；批量标注用 execute_batch_annotation；改标用 mutate_annotation；统计分析用 analyze_data。
-- 不要在不相关的任务上调用 execute_batch_annotation（例如写报告、写算法代码、创建文件夹）。"""
-
-VISION_RULES = """【图片与标注】
-- 看图描述（人数、物体、OCR 等）：`read_image_for_vision`。
-- 查已有标注 JSON：`read_file_annotation`。
-- 批量检测标注：`execute_batch_annotation`（仅当用户确实需要标注图片时）。"""
-
-EXECUTION_TOOL_GUIDE = """【客户端执行工具】（仅在与用户任务匹配时调用）
-- execute_batch_annotation：批量检测并标注图片；user_request 传用户原话。
-- mutate_annotation：修改/删除已有标注框。
-- analyze_data：对标注数据统计分析。
-- 以上工具与 write_workspace_file 可串联；全部必要步骤完成后再写最终总结。"""
-
-PLANNING_GUIDE = """【任务规划】
-- 复合任务可在 reasoning 中列简要步骤，然后对第一步发起真实 tool call。
-- 每一步等 ToolMessage 返回后再决定下一步；需要落盘时不得跳过 write_workspace_file。"""
-
-FILE_WRITE_INTEGRITY = """【文件写入诚信】
-- 只有 write_workspace_file 的 ToolMessage 明确表示提案已生成时，才可告知用户「请在上方变更列表中 Keep All 确认写入」。
-- 禁止编造文件路径、禁止展示「已写入磁盘」的虚假结论。"""
-
-WORKSPACE_ASSIST_TASK = """【任务】在 LR-Agent 内回答用户问题，并用工具完成读/写文件等操作。
-""" + TOOL_DISCIPLINE + """
-- 读文本/代码：`read_workspace_file`；PDF/DOCX：`read_document_file`
-""" + VISION_RULES + """
-""" + WRITE_TOOL_GUIDE + """
-""" + FILE_WRITE_INTEGRITY + """
+WORKSPACE_ASSIST_TASK = """【任务】在 LR-Agent 内回答用户问题，按需使用工具完成读/写/分析操作。
+{vision_hint}
 - 用自然、简洁的中文回复。"""
 
 ASSISTANT_TASK_BASE = """【任务】在 LR-Agent 内完成问答、标注、分析、写文件等任务。
-""" + TOOL_DISCIPLINE + """
-""" + PLANNING_GUIDE + """
-""" + VISION_RULES + """
-- 读文本/代码：`read_workspace_file`；PDF/DOCX：`read_document_file`
-""" + EXECUTION_TOOL_GUIDE + """
-""" + WRITE_TOOL_GUIDE + """
-""" + FILE_WRITE_INTEGRITY + """
+按需使用工具；系统自动管理文件写入确认与工具调度。
+{vision_hint}
 - 用自然、简洁的中文回复。"""
+
+# 向后兼容保留旧常量引用（如有外部引用）
+WRITE_TOOL_GUIDE = ""
+TOOL_DISCIPLINE = ""
+VISION_RULES = ""
+EXECUTION_TOOL_GUIDE = ""
+PLANNING_GUIDE = ""
+FILE_WRITE_INTEGRITY = ""
 
 
 def format_runtime_identity_block(
@@ -106,9 +81,10 @@ def format_snapshot_for_prompt(snapshot: AnnotationProjectSnapshotInput) -> str:
 
 
 def build_workspace_assistant_system_prompt(client_context: ClientContextInput | None) -> str:
+    task = WORKSPACE_ASSIST_TASK.format(vision_hint=VISION_HINT)
     if client_context is None:
-        return WORKSPACE_ASSIST_TASK
-    parts = [WORKSPACE_ASSIST_TASK]
+        return task
+    parts = [task]
     if client_context.workspace_root:
         parts.append(f"\n【工作区】\n根目录: {client_context.workspace_root}")
     if client_context.active_file_path:
@@ -117,11 +93,12 @@ def build_workspace_assistant_system_prompt(client_context: ClientContextInput |
 
 
 def build_project_assistant_system_prompt(client_context: ClientContextInput | None) -> str:
+    task = ASSISTANT_TASK_BASE.format(vision_hint=VISION_HINT)
     if client_context is None or client_context.annotation_project_snapshot is None:
-        return ASSISTANT_TASK_BASE
+        return task
     snap = client_context.annotation_project_snapshot
     return (
-        f"{ASSISTANT_TASK_BASE}\n\n"
+        f"{task}\n\n"
         f"【当前标注项目快照】\n{format_snapshot_for_prompt(snap)}"
     )
 

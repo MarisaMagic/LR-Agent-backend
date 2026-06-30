@@ -1,6 +1,18 @@
 from typing import Any, Literal
+from enum import Enum
 
 from pydantic import BaseModel, Field
+
+
+class JobState(str, Enum):
+    """Agent 任务生命周期状态。"""
+    REGISTERED = "registered"       # 任务刚注册，尚未开始推理
+    STREAMING = "streaming"          # LLM 正在流式输出
+    TOOL_PENDING = "tool_pending"    # 等待前端执行客户端工具
+    RESUMING = "resuming"            # 前端 resume，正在继续推理
+    DONE = "done"                    # 正常结束
+    ERROR = "error"                  # 异常终止（stream_failed 等）
+    CANCELLED = "cancelled"          # 用户主动取消
 
 
 class ChatMessageInput(BaseModel):
@@ -243,7 +255,7 @@ class ChatCancelRequest(BaseModel):
 
 
 class ClientToolCallPayload(BaseModel):
-    """client_tool_pending SSE 事件中单个客户端工具调用的描述。"""
+    """tool_pending SSE 事件中单个客户端工具调用的描述。"""
 
     tool_call_id: str
     name: str
@@ -256,7 +268,7 @@ class StreamEventPayload(BaseModel):
       preparing / context_updated / route_decided /
       file_proposal_start / file_proposal_delta / document_proposal / file_proposal /
       annotation_progress / annotation_proposal /
-      analysis_script_proposal / tool_pending / client_tool_pending / error / done
+      analysis_script_proposal / tool_pending / error / done
     """
 
     type: str
@@ -278,7 +290,7 @@ class StreamEventPayload(BaseModel):
     domain: str | None = None
     target: str | None = None
     reason: str | None = None
-    # client_tool_pending 专用字段
+    # tool_pending 专用字段：异步客户端工具调用清单
     client_tool_calls: list[ClientToolCallPayload] | None = None
 
     @classmethod
