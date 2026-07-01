@@ -31,6 +31,7 @@ from app.agent.tools.workspace_file_reader import (
     read_workspace_text_file,
     write_workspace_file_tool,
 )
+from app.agent.tools.workspace_search import grep_workspace, list_workspace_directory
 from app.core.config import Settings
 from app.models.user import User
 from app.schemas.agent import ClientContextInput
@@ -137,10 +138,38 @@ def _build_all_tools(
             return err or "未找到标注。"
         return json.dumps(doc, ensure_ascii=False, indent=2)[:12_000]
 
-    def read_workspace_file(relative_path: str = "") -> str:
+    def read_workspace_file(
+        relative_path: str = "",
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
         return read_workspace_text_file(
             client_context,
             relative_path,
+            settings=settings,
+            start_line=start_line,
+            end_line=end_line,
+        )
+
+    def grep_tool(
+        pattern: str,
+        path: str = "",
+        glob_pattern: str = "*",
+        case_insensitive: bool = False,
+    ) -> str:
+        return grep_workspace(
+            client_context,
+            pattern,
+            path=path,
+            glob_pattern=glob_pattern,
+            case_insensitive=case_insensitive,
+            settings=settings,
+        )
+
+    def list_directory_tool(relative_dir: str = "") -> str:
+        return list_workspace_directory(
+            client_context,
+            relative_dir,
             settings=settings,
         )
 
@@ -193,6 +222,26 @@ def _build_all_tools(
             description=(
                 "读取工作区或项目内的文本/代码文件内容（如 .py .ts .md .json .yaml .txt）。"
                 "relative_path 为空时使用当前打开文件。"
+                "可选 start_line / end_line（1-indexed，含首尾）读取指定行范围。"
+                "找代码时建议先用 grep_workspace 定位，再读本工具读具体行。"
+            ),
+        ),
+        StructuredTool.from_function(
+            func=grep_tool,
+            name="grep_workspace",
+            description=(
+                "在工作区内按正则搜索代码/文本，返回 path:line: content 格式。"
+                "找定义、引用、符号时优先使用；命中后再对具体文件调用 read_workspace_file。"
+                "pattern 为正则；path 为相对目录或文件（空=整个工作区）；"
+                "glob_pattern 可选如 *.py、*.ts。"
+            ),
+        ),
+        StructuredTool.from_function(
+            func=list_directory_tool,
+            name="list_workspace_directory",
+            description=(
+                "列出工作区目录下的文件与子目录（name | kind | relativePath）。"
+                "relative_dir 为空时列出工作区根；用于了解项目结构。"
             ),
         ),
         StructuredTool.from_function(

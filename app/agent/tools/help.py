@@ -8,7 +8,7 @@ LR_AGENT_HELP = """# LR-Agent 功能概览
 - **大模型配置**：添加 OpenAI 兼容 API（如通义、DeepSeek）
 - **Agent 面板**：右侧对话助手，支持工具查询账户、读取文件与当前界面上下文
 
-**Ask 模式**：问答、查已有标注（read_file_annotation）、读文本/代码（read_workspace_file）、读文档（read_document_file）、看图（read_image_for_vision）；不写入标注文件。
+**Ask 模式**：问答、查已有标注（read_file_annotation）、搜索代码（grep_workspace）、列目录（list_workspace_directory）、读文本/代码（read_workspace_file，支持行范围）、读文档（read_document_file）、看图（read_image_for_vision）；不写入标注文件。
 **Agent 模式**：批量检测与提案；标注变更（改标签/删框）；数据分析（脚本预览后执行）；报告/文档（Markdown）。
 执行批量写入或变更标注请描述明确图片范围；查某张图已有标注在 Ask 即可。"""
 

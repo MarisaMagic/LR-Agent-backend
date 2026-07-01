@@ -18,6 +18,8 @@ class AssistMode(str, Enum):
 # 每种模式的工具白名单
 LIGHT_TOOL_SET: frozenset[str] = frozenset({
     "read_workspace_file",
+    "grep_workspace",
+    "list_workspace_directory",
     "read_document_file",
     "read_image_for_vision",
     "write_workspace_file",
@@ -30,6 +32,8 @@ LIGHT_TOOL_SET: frozenset[str] = frozenset({
 
 FULL_TOOL_SET: frozenset[str] = frozenset({
     "read_workspace_file",
+    "grep_workspace",
+    "list_workspace_directory",
     "read_document_file",
     "read_image_for_vision",
     "write_workspace_file",

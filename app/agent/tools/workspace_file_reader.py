@@ -67,8 +67,10 @@ def read_workspace_text_file(
     path: str,
     *,
     settings: Settings,
+    start_line: int | None = None,
+    end_line: int | None = None,
 ) -> str:
-    """读取 UTF-8 文本/代码文件，按配置截断字节数与行数。"""
+    """读取 UTF-8 文本/代码文件，按配置截断字节数与行数；可选行范围（1-indexed，含首尾）。"""
     resolved, err = resolve_workspace_file(client_context, path)
     if resolved is None:
         return err
@@ -110,13 +112,29 @@ def read_workspace_text_file(
             return f"「{resolved.name}」不是 UTF-8 文本，暂不支持读取。"
 
     lines = text.splitlines()
+    total_lines = len(lines)
     if len(lines) > max_lines:
         truncated = True
         lines = lines[:max_lines]
-        text = "\n".join(lines)
+
+    line_range_applied = False
+    if start_line is not None or end_line is not None:
+        s = max(1, start_line if start_line is not None else 1)
+        e = end_line if end_line is not None else len(lines)
+        if e < s:
+            return f"无效行范围：start_line ({s}) 不能大于 end_line ({e})。"
+        lines = lines[s - 1 : e]
+        line_range_applied = True
+        range_label = f"L{s}-L{e}"
+    else:
+        range_label = ""
+
+    text = "\n".join(lines)
 
     rel_hint = resolved.name
     header = f"文件：{rel_hint}\n大小：{size} 字节\n"
+    if line_range_applied:
+        header += f"行范围：{range_label}（共 {total_lines} 行）\n"
     if truncated:
         header += f"（内容已截断，最多 {max_bytes} 字节 / {max_lines} 行）\n"
     header += "---\n"

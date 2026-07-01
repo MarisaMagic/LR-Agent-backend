@@ -103,6 +103,61 @@ def resolve_workspace_file(
     return None, f"未找到文件：{rel}"
 
 
+def resolve_workspace_directory(
+    client_context: ClientContextInput | None,
+    path: str,
+) -> tuple[Path | None, str]:
+    """解析并校验目录路径，返回 (绝对路径, 错误信息)。
+
+    - path 为空时回退到第一个 allowed root（工作区根）
+    - 支持绝对路径（须在 allowed_roots 内）与相对路径
+    - 禁止 .. 目录穿越
+    """
+    raw = (path or "").strip()
+    roots = allowed_roots(client_context)
+    if not roots:
+        return None, "未绑定工作区或项目目录，无法访问本地目录。"
+
+    if not raw:
+        root = roots[0]
+        if root.is_dir():
+            return root, ""
+        return None, "工作区根目录无效。"
+
+    candidate_input = Path(raw)
+    if candidate_input.is_absolute():
+        try:
+            candidate = candidate_input.resolve()
+        except OSError as exc:
+            return None, f"路径无效：{exc}"
+        for root in roots:
+            if _is_under_root(candidate, root) and candidate.is_dir():
+                return candidate, ""
+        return None, "目录不在当前工作区或项目目录内。"
+
+    rel = normalize_relative_path(raw)
+    if ".." in rel.split("/"):
+        return None, "路径不能包含 .."
+
+    for root in roots:
+        candidate = (root / rel).resolve()
+        if not _is_under_root(candidate, root):
+            continue
+        if candidate.is_dir():
+            return candidate, ""
+    return None, f"未找到目录：{rel}"
+
+
+def relative_path_from_roots(candidate: Path, roots: list[Path]) -> str:
+    """将绝对路径转为相对工作区根的路径（正斜杠）。"""
+    for root in roots:
+        try:
+            return normalize_relative_path(str(candidate.relative_to(root)))
+        except ValueError:
+            continue
+    return candidate.name
+
+
 def resolve_workspace_write_path(
     client_context: ClientContextInput | None,
     path: str,

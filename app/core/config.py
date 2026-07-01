@@ -94,6 +94,9 @@ class Settings(BaseSettings):
     agent_read_file_max_bytes: int = 524_288
     agent_read_file_max_lines: int = 2000
     agent_read_document_max_pages: int = 30
+    agent_grep_max_results: int = 50
+    agent_grep_max_files_scanned: int = 500
+    agent_list_dir_max_entries: int = 80
 
     agent_mutation_enabled: bool = True
     agent_analysis_enabled: bool = True

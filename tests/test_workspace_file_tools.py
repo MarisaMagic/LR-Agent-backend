@@ -23,7 +23,10 @@ def workspace(tmp_path: Path) -> Path:
     root = tmp_path / "workspace"
     root.mkdir()
     (root / "src").mkdir()
-    (root / "src" / "main.py").write_text("print('hello')\n", encoding="utf-8")
+    (root / "src" / "main.py").write_text(
+        "def hello():\n    print('hello')\n\nclass Foo:\n    pass\n",
+        encoding="utf-8",
+    )
     (root / "notes.md").write_text("# Title\n", encoding="utf-8")
     (root / "secret").mkdir()
     (root / "secret" / "outside.txt").write_text("nope", encoding="utf-8")
@@ -85,6 +88,33 @@ def test_read_workspace_text(client_context: ClientContextInput, settings: Setti
     content = read_workspace_text_file(client_context, "notes.md", settings=settings)
     assert "Title" in content
     assert content.startswith("文件：")
+
+
+def test_read_workspace_line_range(client_context: ClientContextInput, settings: Settings) -> None:
+    content = read_workspace_text_file(
+        client_context,
+        "src/main.py",
+        settings=settings,
+        start_line=2,
+        end_line=3,
+    )
+    assert "行范围：L2-L3" in content
+    assert "print('hello')" in content
+    assert "class Foo" not in content
+
+
+def test_read_workspace_invalid_line_range(
+    client_context: ClientContextInput,
+    settings: Settings,
+) -> None:
+    content = read_workspace_text_file(
+        client_context,
+        "src/main.py",
+        settings=settings,
+        start_line=10,
+        end_line=2,
+    )
+    assert "无效行范围" in content
 
 
 def test_read_image_for_vision_returns_marker(
