@@ -14,7 +14,7 @@ async def stream_chat(
 ) -> AsyncIterator[StreamEventPayload]:
     yield StreamEventPayload(type="preparing", stage="streaming")
     async for chunk in llm.astream(lc_messages):
-        for event in events_from_chunk(chunk):
+        for event in events_from_chunk(chunk, emit_tool_chunks=False):
             yield event
 
 

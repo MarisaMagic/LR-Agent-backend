@@ -1,318 +1,102 @@
+"""Agent API — compute-only endpoints for annotation runs.
+
+Session/chat CRUD and LLM streaming have been moved to the Electron frontend
+(local SQLite storage + direct LLM API calls).
+
+The annotation-run endpoints remain here because they require server-side
+heavy compute (YOLO/SAM2 inference, annotation data processing).
+"""
+
+import asyncio
 import json
 import logging
-import time
-import uuid
-from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
 
-from app.agent.llm_factory import build_chat_model
-from app.agent.orchestrator import ChatOrchestrator
+from app.agent import assist_service, chat_service
+from app.agent.assist_mode_router import (
+    FULL_TOOL_SET,
+    LIGHT_TOOL_SET,
+    AssistMode,
+)
+from app.agent.context_service import CHAT_SYSTEM_PROMPT
+from app.agent.context_snapshot import (
+    build_assist_system_prompt,
+    format_runtime_identity_block,
+)
+from app.agent.tools.mcp_client import load_mcp_tools_from_server
+from app.agent.tools.registry import build_tools_by_name_set
+from app.agent.tools.tool_registry_meta import CANONICAL_CAPABILITIES
 from app.core.deps import CurrentUser, DbSession, RedisClient, SettingsDep
+from app.models.user import User
 from app.schemas.agent import (
     AgentMessageBlockPatchRequest,
-    AgentSessionCreateRequest,
-    AgentSessionDetailResponse,
-    AgentSessionListResponse,
-    AgentSessionPatchRequest,
-    AgentSessionPublic,
     AnnotationRunEventsRequest,
     AnnotationRunFinalizeRequest,
     AnnotationRunStartRequest,
     ChatCancelRequest,
-    ChatStreamRequest,
-    TurnUnderstandRequest,
-    TurnUnderstandResponse,
+    ClientContextInput,
+    LocalChatStreamRequest,
+    StreamEventPayload,
 )
-from app.services.llm_provider_service import LlmProviderService
 from app.services.agent_chat_repository import AgentChatRepository
-from app.services.agent_job_service import AgentJobService
 from app.services.annotation_run_service import AnnotationRunService
 from app.services.agent_rate_limit import (
     check_agent_session_write_limit,
-    check_agent_stream_limit,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-
-def _new_session_id() -> str:
-    suffix = format(time.time_ns() % 1_000_000_000, "x")
-    return f"session-{suffix}"
+# -- module-level cancellation store for stateless /chat/stream ---------
+_cancel_events: dict[str, asyncio.Event] = {}
 
 
-async def _sse_stream(
-    orchestrator: ChatOrchestrator,
-    user: CurrentUser,
-    body: ChatStreamRequest,
-    *,
-    settings: SettingsDep,
-) -> AsyncIterator[str]:
-    try:
-        async for event in orchestrator.run(user, body):
-            payload = event.to_sse_dict()
-            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-    except Exception:
-        logger.exception("sse stream failed user=%s session=%s", user.id, body.session_id)
-        err = {"type": "error", "message": "stream_failed"}
-        if settings.debug:
-            err["detail"] = "stream_failed"
-        yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+def _get_or_create_cancel_event(client_job_id: str) -> asyncio.Event:
+    if client_job_id not in _cancel_events:
+        _cancel_events[client_job_id] = asyncio.Event()
+    return _cancel_events[client_job_id]
 
 
-@router.get("/sessions", response_model=AgentSessionListResponse)
-async def list_agent_sessions(
-    current_user: CurrentUser,
-    db: DbSession,
-    redis: RedisClient,
-    settings: SettingsDep,
-    limit: int = Query(default=None, ge=1),
-    cursor: str | None = None,
-    annotation_project_id: str | None = Query(default=None, max_length=64),
-    workspace_only: bool = Query(default=False),
-) -> AgentSessionListResponse:
-    page_limit = limit or settings.agent_session_list_default_limit
-    page_limit = min(page_limit, settings.agent_session_list_max_limit)
-    repo = AgentChatRepository(db, redis, settings)
-    try:
-        sessions, next_cursor, has_more = await repo.list_sessions(
-            current_user.id,
-            limit=page_limit,
-            cursor=cursor,
-            annotation_project_id=annotation_project_id,
-            workspace_only=workspace_only,
-        )
-    except ValueError as exc:
-        if str(exc) == "invalid_cursor":
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_cursor") from exc
-        raise
-    return AgentSessionListResponse(
-        sessions=sessions,
-        next_cursor=next_cursor,
-        has_more=has_more,
+def _cleanup_cancel_event(client_job_id: str) -> None:
+    _cancel_events.pop(client_job_id, None)
+
+
+def _anonymous_user() -> User:
+    """Minimal anonymous User for tool building in stateless mode."""
+    import uuid
+    return User(
+        id=uuid.uuid4(),
+        email="anonymous@local",
+        email_verified=False,
+        username="anonymous",
+        display_name="本地匿名用户",
     )
 
 
-@router.post("/sessions", response_model=AgentSessionPublic, status_code=status.HTTP_201_CREATED)
-async def create_agent_session(
-    body: AgentSessionCreateRequest,
-    current_user: CurrentUser,
-    db: DbSession,
-    redis: RedisClient,
-    settings: SettingsDep,
-) -> AgentSessionPublic:
-    await check_agent_session_write_limit(redis, settings, current_user.id)
-    repo = AgentChatRepository(db, redis, settings)
-    session_id = body.id or _new_session_id()
-    existing = await repo.get_session_for_user(current_user.id, session_id)
-    if existing is not None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="session_exists")
-    return await repo.create_session(
-        current_user.id,
-        session_id=session_id,
-        title=body.title,
-        provider_id=body.provider_id,
-        model=body.model,
-        annotation_project_id=body.annotation_project_id,
-        interaction_mode=body.interaction_mode,
-    )
-
-
-@router.get("/sessions/{session_id}", response_model=AgentSessionDetailResponse)
-async def get_agent_session(
-    session_id: str,
-    current_user: CurrentUser,
-    db: DbSession,
-    redis: RedisClient,
-    settings: SettingsDep,
-    limit: int = Query(default=None, ge=1),
-    before_message_id: str | None = None,
-) -> AgentSessionDetailResponse:
-    page_limit = limit or settings.agent_message_page_default_limit
-    page_limit = min(page_limit, settings.agent_message_page_max_limit)
-    repo = AgentChatRepository(db, redis, settings)
-    try:
-        detail = await repo.get_session_detail(
-            current_user.id,
-            session_id,
-            limit=page_limit,
-            before_message_id=before_message_id,
+def _build_lc_messages_from_local(
+    body: LocalChatStreamRequest,
+    system_prompt: str,
+) -> list:
+    """Build LangChain messages from LocalChatStreamRequest (no DB dependency)."""
+    lc_messages: list = [SystemMessage(content=system_prompt)]
+    if body.context_summary:
+        lc_messages.append(
+            SystemMessage(content=f"【此前对话摘要】\n{body.context_summary}"),
         )
-    except ValueError as exc:
-        if str(exc) == "message_not_found":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="message_not_found",
-            ) from exc
-        raise
-    if detail is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session_not_found")
-    return detail
-
-
-@router.patch("/sessions/{session_id}", response_model=AgentSessionPublic)
-async def patch_agent_session(
-    session_id: str,
-    body: AgentSessionPatchRequest,
-    current_user: CurrentUser,
-    db: DbSession,
-    redis: RedisClient,
-    settings: SettingsDep,
-) -> AgentSessionPublic:
-    await check_agent_session_write_limit(redis, settings, current_user.id)
-    repo = AgentChatRepository(db, redis, settings)
-    updated = await repo.update_session(
-        current_user.id,
-        session_id,
-        title=body.title,
-        provider_id=body.provider_id,
-        model=body.model,
-    )
-    if updated is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session_not_found")
-    return updated
-
-
-@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_agent_session(
-    session_id: str,
-    current_user: CurrentUser,
-    db: DbSession,
-    redis: RedisClient,
-    settings: SettingsDep,
-) -> None:
-    await check_agent_session_write_limit(redis, settings, current_user.id)
-    repo = AgentChatRepository(db, redis, settings)
-    deleted = await repo.delete_session(current_user.id, session_id)
-    if not deleted:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session_not_found")
-
-
-@router.post("/turn/understand", summary="统一回合理解（指代消解 + 意图 + 路由）")
-async def turn_understand(
-    body: TurnUnderstandRequest,
-    current_user: CurrentUser,
-    db: DbSession,
-    redis: RedisClient,
-    settings: SettingsDep,
-) -> dict[str, TurnUnderstandResponse]:
-    await check_agent_session_write_limit(redis, settings, current_user.id)
-    provider_svc = LlmProviderService(db, settings)
-    try:
-        provider_uuid = uuid.UUID(body.provider_id)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="invalid_provider_id",
-        ) from exc
-
-    row = await provider_svc.get_for_user(provider_uuid, current_user.id)
-    if row is None or not row.enabled:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="llm_provider_not_found",
-        )
-
-    try:
-        provider_svc.validate_provider_base_url(row)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="invalid_base_url",
-        ) from exc
-
-    api_key = provider_svc.decrypt_api_key(row)
-    llm = build_chat_model(row, api_key, streaming=False, temperature=0.1)
-    provider_is_vision = await provider_svc.ensure_vision_probed(row)
-
-    conversation_transcript = ""
-    if body.session_id:
-        from app.agent.turn_context import build_turn_context
-        from app.services.agent_chat_repository import AgentChatRepository
-
-        repo = AgentChatRepository(db, redis, settings)
-        turn = await build_turn_context(
-            repo,
-            body.session_id,
-            user_id=current_user.id,
-            current_user_content=body.user_content,
-            up_to_message_id=body.truncate_from_message_id,
-            exclude_message_id=body.assistant_message_id,
-            max_turns_in_window=settings.agent_default_max_turns_in_window,
-        )
-        conversation_transcript = turn.transcript
-
-    from app.agent.turn_understanding_service import understand_turn
-
-    try:
-        result = await understand_turn(
-            llm,
-            user_content=body.user_content,
-            client_context=body.client_context,
-            conversation_transcript=conversation_transcript,
-            provider_is_vision=provider_is_vision,
-            image_catalog_hint=body.image_catalog_hint,
-        )
-    except Exception as exc:
-        logger.exception("turn_understand failed user=%s", current_user.id)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="turn_understand_failed",
-        ) from exc
-
-    response = TurnUnderstandResponse(
-        resolved_user_content=result.resolved_user_content,
-        referenced_relative_paths=result.referenced_relative_paths,
-        resolved_active_relative_path=result.resolved_active_relative_path,
-        task_intent=result.task_intent,
-        turn_kind=result.turn_kind,
-        needs_vision_input=result.needs_vision_input,
-        confidence=result.confidence,
-        scope_notes=result.scope_notes,
-        reason=result.reason,
-        user_visible_hint=result.user_visible_hint,
-    )
-    return {"data": response}
-
-
-@router.post("/chat/stream")
-async def chat_stream(
-    body: ChatStreamRequest,
-    current_user: CurrentUser,
-    db: DbSession,
-    redis: RedisClient,
-    settings: SettingsDep,
-) -> StreamingResponse:
-    await check_agent_stream_limit(redis, settings, current_user.id)
-    jobs = AgentJobService(redis, settings)
-    orchestrator = ChatOrchestrator(db, redis, jobs, settings)
-
-    return StreamingResponse(
-        _sse_stream(orchestrator, current_user, body, settings=settings),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@router.post("/chat/cancel")
-async def chat_cancel(
-    body: ChatCancelRequest,
-    current_user: CurrentUser,
-    redis: RedisClient,
-    settings: SettingsDep,
-) -> dict[str, str]:
-    jobs = AgentJobService(redis, settings)
-    cancelled = await jobs.mark_cancelled(str(current_user.id), body.client_job_id)
-    if not cancelled:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
-    return {"status": "cancelled"}
+    for item in body.messages:
+        if item.role == "user":
+            lc_messages.append(HumanMessage(content=item.content))
+        elif item.role == "assistant":
+            lc_messages.append(AIMessage(content=item.content))
+        elif item.role == "system":
+            lc_messages.append(SystemMessage(content=item.content))
+    return lc_messages
 
 
 def _annotation_run_http_error(exc: ValueError) -> HTTPException:
@@ -382,6 +166,7 @@ async def patch_agent_message_block(
     settings: SettingsDep,
     session_id: str = Query(..., min_length=1, max_length=64),
 ) -> dict[str, bool]:
+    """Update a message block (kept for annotation proposal status updates)."""
     await check_agent_session_write_limit(redis, settings, current_user.id)
     repo = AgentChatRepository(db, redis, settings)
     ok = await repo.patch_message_block(
@@ -394,4 +179,153 @@ async def patch_agent_message_block(
     )
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="message_or_block_not_found")
+    return {"ok": True}
+
+
+async def _stream_local_chat(body: LocalChatStreamRequest, settings) -> Any:
+    """无状态 chat/stream 生成器——所有数据从请求体获取，不读 DB。"""
+    client_job_id: str = body.client_job_id
+    cancel_event = _get_or_create_cancel_event(client_job_id)
+
+    async def is_cancelled() -> bool:
+        return cancel_event.is_set()
+
+    try:
+        # -- 构建 ChatOpenAI --
+        base_url = body.base_url.rstrip("/")
+        llm = ChatOpenAI(
+            model=body.model,
+            api_key=body.api_key,
+            base_url=base_url,
+            streaming=True,
+            temperature=0.7,
+            timeout=120,
+        )
+
+        client_ctx: ClientContextInput | None = body.client_context
+        has_tools = bool(client_ctx and (
+            (client_ctx.workspace_root or "").strip() or
+            client_ctx.active_annotation_project_id or
+            client_ctx.annotation_project_snapshot is not None
+        ))
+
+        if has_tools:
+            # -- Assist 模式: 工具调用 --
+            user = _anonymous_user()
+
+            # 构建系统提示词
+            identity = format_runtime_identity_block(
+                model=body.model,
+                provider_label="local",
+                supports_vision=body.supports_vision,
+            )
+            if client_ctx:
+                system_prompt = build_assist_system_prompt(
+                    client_ctx,
+                    model=body.model,
+                    provider_label="local",
+                    supports_vision=body.supports_vision,
+                )
+            else:
+                system_prompt = f"{identity}\n\n{CHAT_SYSTEM_PROMPT}"
+
+            lc_messages = _build_lc_messages_from_local(body, system_prompt)
+
+            # Tool 选择
+            has_workspace = bool(client_ctx and (client_ctx.workspace_root or "").strip())
+            has_project_snapshot = bool(
+                client_ctx and client_ctx.annotation_project_snapshot is not None
+            )
+            is_editor = bool(
+                client_ctx and client_ctx.work_mode == "editor"
+            )
+
+            if has_project_snapshot:
+                tool_set = FULL_TOOL_SET
+            elif is_editor or has_workspace:
+                tool_set = LIGHT_TOOL_SET
+            else:
+                tool_set = frozenset()
+            tools = build_tools_by_name_set(
+                user,
+                client_ctx,
+                tool_set,
+                settings=settings,
+                provider_is_vision=body.supports_vision,
+            )
+
+            # MCP 工具动态注入
+            mcp_url = (
+                (client_ctx.mcp_server_url or "").strip()
+                if client_ctx
+                else ""
+            )
+            if mcp_url:
+                try:
+                    mcp_tools = await load_mcp_tools_from_server(
+                        mcp_url,
+                        existing_capabilities=CANONICAL_CAPABILITIES,
+                    )
+                    if mcp_tools:
+                        existing = {t.name for t in tools}
+                        tools = tools + [
+                            t for t in mcp_tools if t.name not in existing
+                        ]
+                except Exception:
+                    logger.warning("Failed to load MCP tools from %s", mcp_url, exc_info=True)
+
+            if body.client_tool_results:
+                assist_service.append_client_tool_results_to_messages(
+                    lc_messages, body.client_tool_results, user_content=body.user_content
+                )
+
+            stream = assist_service.stream_assist(
+                llm,
+                lc_messages,
+                tools,
+                settings=settings,
+                max_tool_rounds=settings.agent_max_tool_rounds,
+                is_cancelled=is_cancelled,
+                provider_is_vision=body.supports_vision,
+                client_context=client_ctx,
+                user_content=body.user_content,
+                client_tool_results=body.client_tool_results or None,
+            )
+        else:
+            # -- Chat 模式: 纯对话 --
+            system_prompt = body.system_prompt or CHAT_SYSTEM_PROMPT
+            lc_messages = _build_lc_messages_from_local(body, system_prompt)
+            stream = chat_service.stream_chat(llm, lc_messages)
+
+        async for event in stream:
+            if await is_cancelled():
+                break
+            yield f"data: {event.model_dump_json(exclude_none=True)}\n\n"
+
+        yield "data: {\"type\": \"done\"}\n\n"
+
+    finally:
+        _cleanup_cancel_event(client_job_id)
+
+
+@router.post("/chat/stream")
+async def local_chat_stream(
+    body: LocalChatStreamRequest,
+    settings: SettingsDep,
+) -> StreamingResponse:
+    """无状态 chat/stream —— 所有数据从请求体获取，不读 DB。"""
+    return StreamingResponse(
+        _stream_local_chat(body, settings),
+        media_type="text/event-stream",
+    )
+
+
+@router.post("/chat/cancel")
+async def cancel_chat(
+    body: ChatCancelRequest,
+) -> dict[str, bool]:
+    """取消正在进行的 chat/stream 任务。"""
+    event = _cancel_events.get(body.client_job_id)
+    if event:
+        event.set()
     return {"ok": True}

@@ -26,8 +26,12 @@ from app.agent.llm_factory import build_chat_model
 from app.agent.turn_context import build_turn_context_from_messages, turn_context_to_chat_inputs
 from app.agent.tools.mcp_client import load_mcp_tools_from_server
 from app.agent.tools.tool_registry_meta import CANONICAL_CAPABILITIES
-from app.agent.assist_mode_router import AssistMode, AssistModeRouter
-from app.agent.tools.registry import build_tools_by_name_set, build_tools_p1
+from app.agent.assist_mode_router import (
+    FULL_TOOL_SET,
+    LIGHT_TOOL_SET,
+    AssistMode,
+)
+from app.agent.tools.registry import ANNOTATION_TOOL_NAMES, build_tools_by_name_set, build_tools_p1
 from app.core.config import Settings
 from app.models.user import User
 from app.schemas.agent import ChatContextInput, ChatStreamRequest, JobState, StreamEventPayload
@@ -134,13 +138,16 @@ class ChatOrchestrator:
 
         yield StreamEventPayload(type="preparing", stage="build_messages")
 
-        # ── 阶段 4：turn_kind 驱动路由 ─────────────────────────────────
+        # ── 阶段 4：context 直接驱动路由 ─────────────────────────────────
         client_ctx = req.client_context
         has_project_snapshot = bool(
             client_ctx and client_ctx.annotation_project_snapshot is not None
         )
         has_workspace = bool(
             client_ctx and (client_ctx.workspace_root or "").strip()
+        )
+        is_editor = bool(
+            client_ctx and client_ctx.work_mode == "editor"
         )
 
         # 探测模型是否支持视觉输入，供后续提示词与工具路由使用
@@ -161,17 +168,16 @@ class ChatOrchestrator:
             supports_vision=provider_is_vision,
         )
 
-        # 使用 turn_kind 驱动路由决策
-        turn_kind = (
-            client_ctx.turn_understanding.turn_kind
-            if client_ctx and client_ctx.turn_understanding
-            else "converse"
-        )
-        assist_mode, tool_set = AssistModeRouter.resolve(
-            turn_kind,
-            has_project_snapshot=has_project_snapshot,
-            has_workspace=has_workspace,
-        )
+        # 直接根据 context 决定模式与工具集（不再依赖 turn_kind 分类）
+        if has_project_snapshot:
+            assist_mode = AssistMode.FULL
+            tool_set = FULL_TOOL_SET
+        elif is_editor or has_workspace:
+            assist_mode = AssistMode.LIGHT
+            tool_set = LIGHT_TOOL_SET
+        else:
+            assist_mode = AssistMode.CHAT
+            tool_set = frozenset()
         has_assist_tools = assist_mode != AssistMode.CHAT
 
         if assist_mode == AssistMode.CHAT:

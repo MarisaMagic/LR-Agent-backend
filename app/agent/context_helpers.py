@@ -1,7 +1,6 @@
 """客户端上下文提取与格式化工具。
 
 从 ClientContextInput 中统一读取标注项目、工作区路径等字段，供下游模块复用：
-  - turn_understanding_service：组装回合理解 LLM 的 human 消息、规范化路径输出
   - tools/workspace_path、tools/registry：解析项目目录作为文件读取的根路径
 """
 

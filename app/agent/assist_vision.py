@@ -19,21 +19,12 @@ from app.agent.tools.workspace_file_reader import (
 from app.agent.tools.workspace_path import resolve_workspace_file
 from app.core.config import Settings
 from app.schemas.agent import ClientContextInput, StreamEventPayload
-from app.agent.turn_understanding_service import TurnUnderstandingResult
 
 
 def pick_vision_relative_path(
     client_context: ClientContextInput | None,
-    understanding: TurnUnderstandingResult | None,
 ) -> str:
-    """Best relative path for auto vision load (referenced paths > active > empty for UI file)."""
-    if understanding is not None:
-        paths = [p.strip() for p in understanding.referenced_relative_paths if p.strip()]
-        if paths:
-            return paths[0]
-        active = (understanding.resolved_active_relative_path or "").strip()
-        if active:
-            return active
+    """Best relative path for auto vision load (active_relative_path > empty for UI file)."""
     if client_context is not None:
         rel = (client_context.active_relative_path or "").strip()
         if rel:

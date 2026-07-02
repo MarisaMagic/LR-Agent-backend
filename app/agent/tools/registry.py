@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from langchain_core.tools import StructuredTool
+from pydantic import BaseModel, Field
 
 # 客户端工具名称集合（向后兼容）：由 tool_registry_meta 统一定义
 from app.agent.tools.tool_registry_meta import (
@@ -47,6 +48,20 @@ ANNOTATION_TOOL_NAMES: frozenset[str] = frozenset(
 )
 
 
+# Pydantic args_schema for client tools — forces LLM to include user_request as a required param
+class BatchAnnotationArgs(BaseModel):
+    user_request: str = Field(min_length=1, description="必须原样传递用户的原始请求")
+    scope_hint: str | None = Field(default=None, description="可选范围补充说明")
+
+
+class MutateAnnotationArgs(BaseModel):
+    user_request: str = Field(min_length=1, description="必须原样传递用户的原始请求")
+
+
+class AnalyzeDataArgs(BaseModel):
+    user_request: str = Field(min_length=1, description="必须原样传递用户的原始请求")
+
+
 def _client_tool_stub(tool_name: str) -> StructuredTool:
     """返回一个客户端工具的 schema 存根（func 不会被本地调用）。"""
     # assist_service 在执行工具前会先检测 CLIENT_TOOL_NAMES，拦截并发出 tool_pending
@@ -75,7 +90,7 @@ def build_tools_by_name_set(
     settings: Settings,
     provider_is_vision: bool = False,
 ) -> list[StructuredTool]:
-    """构建指定名称的工具子集（供 AssistModeRouter 使用）。"""
+    """构建指定名称的工具子集。"""
     all_tools = _build_all_tools(user, client_context, settings=settings, provider_is_vision=provider_is_vision)
     return [t for t in all_tools if t.name in tool_set]
 
@@ -286,6 +301,7 @@ def _build_all_tools(
                 "scope_hint（可选）：范围补充说明（如「仅限子目录 train/」）。"
                 "必须发起真实 tool call，正文伪代码无效。"
             ),
+            args_schema=BatchAnnotationArgs,
         ),
         StructuredTool.from_function(
             func=_client_tool_stub("mutate_annotation"),
@@ -296,6 +312,7 @@ def _build_all_tools(
                 "user_request：用户原始请求（如「把所有 dog 标签改为 puppy」）。"
                 "调用后前端生成变更提案，用户确认后执行写入。"
             ),
+            args_schema=MutateAnnotationArgs,
         ),
         StructuredTool.from_function(
             func=_client_tool_stub("analyze_data"),
@@ -306,6 +323,7 @@ def _build_all_tools(
                 "user_request：分析需求（如「各类别标注数量分布」「IoU 分布直方图」）。"
                 "建议先调用此工具获取数据，再结合 write_workspace_file 写入报告或导出文件。"
             ),
+            args_schema=AnalyzeDataArgs,
         ),
     ]
 

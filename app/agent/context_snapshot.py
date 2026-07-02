@@ -1,9 +1,4 @@
-"""Assist 模式系统提示词组装：运行时身份、任务指令与客户端上下文快照。
-
-约束规则已移至 ToolGuard（程序化）和 AssistModeRouter（工具集裁剪），
-prompt 仅保留身份 + 任务简述，不再包含大段工具纪律文本。
-"""
-
+"""Assist 模式系统提示词组装：运行时身份、任务指令与客户端上下文快照。"""
 from __future__ import annotations
 
 from app.schemas.agent import AnnotationProjectSnapshotInput, ClientContextInput
@@ -103,23 +98,6 @@ def build_project_assistant_system_prompt(client_context: ClientContextInput | N
     )
 
 
-def format_turn_task_addon(client_context: ClientContextInput | None) -> str:
-    """注入回合理解 LLM 的路由结论（reason / turn_kind），非用户关键词规则。"""
-    if client_context is None or client_context.turn_understanding is None:
-        return ""
-    tu = client_context.turn_understanding
-    parts: list[str] = []
-    if (tu.reason or "").strip():
-        parts.append(f"路由依据：{tu.reason.strip()}")
-    if (tu.turn_kind or "").strip():
-        parts.append(f"turn_kind：{tu.turn_kind.strip()}")
-    if (tu.scope_notes or "").strip():
-        parts.append(f"范围：{tu.scope_notes.strip()}")
-    if not parts:
-        return ""
-    return "\n【回合理解】" + "；".join(parts)
-
-
 def build_assist_system_prompt(
     client_context: ClientContextInput | None,
     *,
@@ -140,7 +118,6 @@ def build_assist_system_prompt(
         task = build_workspace_assistant_system_prompt(client_context)
     else:
         task = WORKSPACE_ASSIST_TASK
-    addon = format_turn_task_addon(client_context)
     editor_note = ""
     if client_context and client_context.work_mode == "editor":
         editor_note = (
@@ -148,5 +125,4 @@ def build_assist_system_prompt(
             "可使用 read_workspace_file、write_workspace_file、read_document_file 等通用工具。"
         )
     base = f"{identity}\n\n{task}"
-    combined = f"{base}\n{addon}" if addon else base
-    return f"{combined}{editor_note}" if editor_note else combined
+    return f"{base}{editor_note}" if editor_note else base

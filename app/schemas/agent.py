@@ -46,49 +46,6 @@ class AnnotationProjectSnapshotInput(BaseModel):
     project_directory_path: str | None = None
 
 
-TurnKindLiteral = Literal[
-    "execute_batch",
-    "mutate_annotation",
-    "analyze_data",
-    "generate_report",
-    "generate_document",
-    "converse",
-    "clarify_scope",
-    "wants_batch",
-    "unsupported",
-]
-
-TaskIntentLiteral = Literal[
-    "converse",
-    "query_annotation",
-    "execute_batch",
-    "mutate_annotation",
-    "edit_annotation",
-    "delete_annotation",
-    "analyze_data",
-    "generate_report",
-    "generate_document",
-    "clarify_scope",
-    "wants_batch",
-    "unsupported",
-]
-
-
-class TurnUnderstandingResultSchema(BaseModel):
-    """Serialized turn understanding attached to client_context or API responses."""
-
-    resolved_user_content: str = ""
-    referenced_relative_paths: list[str] = Field(default_factory=list)
-    resolved_active_relative_path: str | None = None
-    task_intent: TaskIntentLiteral = "converse"
-    turn_kind: TurnKindLiteral = "converse"
-    needs_vision_input: bool = False
-    confidence: float = Field(ge=0.0, le=1.0, default=0.8)
-    scope_notes: str = ""
-    reason: str = ""
-    user_visible_hint: str | None = None
-
-
 class ClientContextInput(BaseModel):
     workspace_root: str | None = None
     active_file_path: str | None = None
@@ -102,32 +59,7 @@ class ClientContextInput(BaseModel):
     selected_annotation_id: str | None = None
     selected_annotation_ids: list[str] = Field(default_factory=list)
     annotation_project_snapshot: AnnotationProjectSnapshotInput | None = None
-    turn_understanding: TurnUnderstandingResultSchema | None = None
     mcp_server_url: str | None = None
-
-
-class TurnUnderstandRequest(BaseModel):
-    provider_id: str = Field(min_length=1, max_length=64)
-    user_content: str = Field(min_length=1, max_length=20_000)
-    session_id: str | None = Field(default=None, max_length=64)
-    user_message_id: str | None = Field(default=None, max_length=64)
-    assistant_message_id: str | None = Field(default=None, max_length=64)
-    truncate_from_message_id: str | None = Field(default=None, max_length=64)
-    image_catalog_hint: list[str] | None = None
-    client_context: ClientContextInput | None = None
-
-
-class TurnUnderstandResponse(BaseModel):
-    resolved_user_content: str
-    referenced_relative_paths: list[str] = Field(default_factory=list)
-    resolved_active_relative_path: str | None = None
-    task_intent: TaskIntentLiteral = "converse"
-    turn_kind: TurnKindLiteral = "converse"
-    needs_vision_input: bool = False
-    confidence: float = Field(ge=0.0, le=1.0, default=0.8)
-    scope_notes: str = ""
-    reason: str = ""
-    user_visible_hint: str | None = None
 
 
 class ClientToolResult(BaseModel):
@@ -156,6 +88,30 @@ class ChatStreamRequest(BaseModel):
         default_factory=list,
         description="上一轮客户端工具执行结果，前端 resume 时携带",
     )
+
+
+class LocalChatStreamRequest(BaseModel):
+    """Lightweight chat/stream request — no DB dependency.
+    All data (provider config, messages, context) comes from the frontend."""
+    # Provider config
+    api_key: str = Field(min_length=1)
+    base_url: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    supports_vision: bool = False
+    # Messages
+    messages: list[ChatMessageInput]
+    user_content: str = Field(min_length=1)
+    system_prompt: str | None = None
+    # Context
+    context_summary: str | None = None
+    context_summary_up_to_message_id: str | None = None
+    # Tool support
+    client_context: ClientContextInput | None = None
+    client_tool_results: list[ClientToolResult] = Field(
+        default_factory=list,
+        description="上一轮客户端工具执行结果，前端 resume 时携带",
+    )
+    client_job_id: str = Field(min_length=1, max_length=64)
 
 
 class AgentSessionCreateRequest(BaseModel):

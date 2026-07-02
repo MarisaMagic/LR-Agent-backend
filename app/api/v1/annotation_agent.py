@@ -58,7 +58,22 @@ async def _llm_for_provider(
     provider_id: str,
     *,
     temperature: float = 0.0,
+    api_key_direct: str = "",
+    base_url_direct: str = "",
+    model_direct: str = "",
 ):
+    # 前端直传模式：跳过 DB 查询
+    if api_key_direct.strip() and base_url_direct.strip() and model_direct.strip():
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=model_direct.strip(),
+            api_key=api_key_direct.strip(),
+            base_url=base_url_direct.strip().rstrip("/"),
+            streaming=False,
+            temperature=temperature,
+            timeout=120,
+        )
+
     svc = LlmProviderService(db, settings)
     try:
         provider_uuid = uuid.UUID(provider_id)
@@ -112,6 +127,9 @@ async def api_mutation_prepare(
             current_user.id,
             body.provider_id,
             temperature=settings.annotation_prepare_temperature,
+            api_key_direct=body.api_key,
+            base_url_direct=body.base_url,
+            model_direct=body.model,
         )
         label_names = None
         if body.project is not None:
@@ -165,13 +183,20 @@ async def api_batch_prepare(
             current_user.id,
             body.provider_id,
             temperature=settings.annotation_prepare_temperature,
+            api_key_direct=body.api_key,
+            base_url_direct=body.base_url,
+            model_direct=body.model,
         )
-        svc = LlmProviderService(db, settings)
-        provider_uuid = uuid.UUID(body.provider_id)
-        row = await svc.get_for_user(provider_uuid, current_user.id)
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="llm_provider_not_found")
-        provider_is_vision = await svc.ensure_vision_probed(row)
+        is_direct = bool(body.api_key.strip() and body.base_url.strip() and body.model.strip())
+        if is_direct:
+            provider_is_vision = body.supports_vision
+        else:
+            svc = LlmProviderService(db, settings)
+            provider_uuid = uuid.UUID(body.provider_id)
+            row = await svc.get_for_user(provider_uuid, current_user.id)
+            if row is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="llm_provider_not_found")
+            provider_is_vision = await svc.ensure_vision_probed(row)
 
         label_names = None
         project_name = None
@@ -236,11 +261,20 @@ async def api_map_detection_boxes(
     settings: SettingsDep,
 ):
     try:
-        svc = LlmProviderService(db, settings)
-        row = await svc.get_for_user(uuid.UUID(body.provider_id), current_user.id)
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="llm_provider_not_found")
-        provider_is_vision = await svc.ensure_vision_probed(row)
+        is_direct = bool(body.api_key.strip() and body.base_url.strip() and body.model.strip())
+        if is_direct:
+            provider_is_vision = body.supports_vision
+            provider_name = body.model
+            provider_model = body.model
+        else:
+            svc = LlmProviderService(db, settings)
+            row = await svc.get_for_user(uuid.UUID(body.provider_id), current_user.id)
+            if row is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="llm_provider_not_found")
+            provider_is_vision = await svc.ensure_vision_probed(row)
+            provider_name = row.name
+            provider_model = row.model
+            vision_probe_detail = row.vision_probe_detail
         use_vision_requested = bool(body.use_vision)
         use_vision = use_vision_requested and provider_is_vision
         llm = None
@@ -251,15 +285,18 @@ async def api_map_detection_boxes(
                 current_user.id,
                 body.provider_id,
                 temperature=settings.annotation_llm_temperature,
+                api_key_direct=body.api_key,
+                base_url_direct=body.base_url,
+                model_direct=body.model,
             )
         log_annotation_agent(
             "map-api",
             "map-detection-boxes 请求",
             provider_id=body.provider_id,
-            provider_name=row.name,
-            provider_model=row.model,
+            provider_name=provider_name,
+            provider_model=provider_model,
             provider_is_vision=provider_is_vision,
-            vision_probe_detail=row.vision_probe_detail,
+            vision_probe_detail=vision_probe_detail if not is_direct else "direct",
             use_vision_requested=use_vision_requested,
             use_vision_effective=use_vision,
             box_count=len(body.boxes),
@@ -329,11 +366,15 @@ async def api_judge_detection_labels(
                     "checked_boxes": len(body.boxes),
                 }
             }
-        svc = LlmProviderService(db, settings)
-        row = await svc.get_for_user(uuid.UUID(body.provider_id), current_user.id)
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="llm_provider_not_found")
-        provider_is_vision = await svc.ensure_vision_probed(row)
+        is_direct = bool(body.api_key.strip() and body.base_url.strip() and body.model.strip())
+        if is_direct:
+            provider_is_vision = body.supports_vision
+        else:
+            svc = LlmProviderService(db, settings)
+            row = await svc.get_for_user(uuid.UUID(body.provider_id), current_user.id)
+            if row is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="llm_provider_not_found")
+            provider_is_vision = await svc.ensure_vision_probed(row)
         if not provider_is_vision:
             return {
                 "data": {
@@ -353,6 +394,9 @@ async def api_judge_detection_labels(
             current_user.id,
             body.provider_id,
             temperature=settings.annotation_judge_temperature,
+            api_key_direct=body.api_key,
+            base_url_direct=body.base_url,
+            model_direct=body.model,
         )
         result = await judge_detection_labels(
             llm,

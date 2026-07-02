@@ -20,6 +20,11 @@ class ImageCandidateInput(BaseModel):
 
 class AnnotationLlmBaseRequest(BaseModel):
     provider_id: str = Field(min_length=1, max_length=64)
+    # 前端直传模式：当 Electron 本地配置与后端 DB 不同步时，直接传入凭据，跳过 DB 查询
+    api_key: str = ""
+    base_url: str = ""
+    model: str = ""
+    supports_vision: bool = False
 
 
 class MutationPrepareRequest(AnnotationLlmBaseRequest):

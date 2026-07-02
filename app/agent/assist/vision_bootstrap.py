@@ -24,7 +24,7 @@ from app.schemas.agent import ClientContextInput, StreamEventPayload
 class VisionAutoLoader:
     """自动视觉预加载器。
 
-    根据 turn_understanding / user_content 判断是否需要预先加载图片，
+    根据 user_content 判断是否需要预先加载图片，
     通过流式执行 vision tool 将图片注入消息上下文。
     """
 
@@ -46,14 +46,7 @@ class VisionAutoLoader:
         """判断是否需要视觉预加载。"""
         if is_resume or not self.provider_is_vision or self.vision_fn is None:
             return False
-        wants_vision = bool(vision_relative_from_user_text(self.user_content))
-        if (
-            self.client_context
-            and self.client_context.turn_understanding is not None
-            and not self.client_context.turn_understanding.needs_vision_input
-        ):
-            wants_vision = False
-        return wants_vision
+        return bool(vision_relative_from_user_text(self.user_content))
 
     async def try_bootstrap(
         self, messages: list
@@ -63,7 +56,7 @@ class VisionAutoLoader:
         成功返回时将 vision_bootstrapped 设为 True 的标记通过
         传出 events 通知调用方。
         """
-        rel = pick_vision_relative_path(self.client_context, None)
+        rel = pick_vision_relative_path(self.client_context)
         if not rel and self.user_content.strip():
             rel = vision_relative_from_user_text(self.user_content)
 
@@ -83,7 +76,7 @@ class VisionAutoLoader:
         self, messages: list
     ) -> AsyncIterator[StreamEventPayload]:
         """在第一轮无 tool call 时尝试视觉回退（fallback）加载。"""
-        rel = pick_vision_relative_path(self.client_context, None)
+        rel = pick_vision_relative_path(self.client_context)
         if not rel and self.user_content.strip():
             rel = vision_relative_from_user_text(self.user_content)
 
