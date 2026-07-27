@@ -1,18 +1,19 @@
-from typing import Any, Literal
 from enum import Enum
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 
 class JobState(str, Enum):
     """Agent 任务生命周期状态。"""
-    REGISTERED = "registered"       # 任务刚注册，尚未开始推理
-    STREAMING = "streaming"          # LLM 正在流式输出
-    TOOL_PENDING = "tool_pending"    # 等待前端执行客户端工具
-    RESUMING = "resuming"            # 前端 resume，正在继续推理
-    DONE = "done"                    # 正常结束
-    ERROR = "error"                  # 异常终止（stream_failed 等）
-    CANCELLED = "cancelled"          # 用户主动取消
+
+    REGISTERED = "registered"
+    STREAMING = "streaming"
+    TOOL_PENDING = "tool_pending"
+    RESUMING = "resuming"
+    DONE = "done"
+    ERROR = "error"
+    CANCELLED = "cancelled"
 
 
 class ChatMessageInput(BaseModel):
@@ -20,20 +21,6 @@ class ChatMessageInput(BaseModel):
     content: str
     message_id: str | None = None
     interaction_mode: Literal["chat", "annotation"] | None = None
-
-
-class ChatContextConfigInput(BaseModel):
-    max_context_tokens: int = 12_000
-    reserve_completion_tokens: int = 2_048
-    max_turns_in_window: int = 20
-    summarize_trigger_ratio: float = 0.85
-    min_turns_before_summarize: int = 6
-
-
-class ChatContextInput(BaseModel):
-    summary: str | None = None
-    summary_up_to_message_id: str | None = None
-    config: ChatContextConfigInput | None = None
 
 
 class AnnotationProjectSnapshotInput(BaseModel):
@@ -70,140 +57,21 @@ class ClientToolResult(BaseModel):
     result: str = Field(description="工具执行结果（JSON 序列化字符串）")
 
 
-class ChatStreamRequest(BaseModel):
-    provider_id: str = Field(min_length=1, max_length=64)
-    session_id: str = Field(min_length=1, max_length=64)
-    client_job_id: str = Field(min_length=1, max_length=64)
-    user_content: str = Field(min_length=1)
-    user_message_id: str = Field(min_length=1, max_length=64)
-    assistant_message_id: str = Field(min_length=1, max_length=64)
-    truncate_from_message_id: str | None = None
-    messages: list[ChatMessageInput] = Field(
-        default_factory=list,
-        description="登录态下由服务端从 DB 构建；客户端列表仅作兼容",
-    )
-    context: ChatContextInput | None = None
-    client_context: ClientContextInput | None = None
-    client_tool_results: list[ClientToolResult] = Field(
-        default_factory=list,
-        description="上一轮客户端工具执行结果，前端 resume 时携带",
-    )
-
-
 class LocalChatStreamRequest(BaseModel):
-    """Lightweight chat/stream request — no DB dependency.
-    All data (provider config, messages, context) comes from the frontend."""
-    # Provider config
+    """Lightweight chat/stream request — no DB dependency."""
+
     api_key: str = Field(min_length=1)
     base_url: str = Field(min_length=1)
     model: str = Field(min_length=1)
     supports_vision: bool = False
-    # Messages
     messages: list[ChatMessageInput]
     user_content: str = Field(min_length=1)
     system_prompt: str | None = None
-    # Context
     context_summary: str | None = None
     context_summary_up_to_message_id: str | None = None
-    # Tool support
     client_context: ClientContextInput | None = None
-    client_tool_results: list[ClientToolResult] = Field(
-        default_factory=list,
-        description="上一轮客户端工具执行结果，前端 resume 时携带",
-    )
+    client_tool_results: list[ClientToolResult] = Field(default_factory=list)
     client_job_id: str = Field(min_length=1, max_length=64)
-
-
-class AgentSessionCreateRequest(BaseModel):
-    id: str | None = Field(default=None, max_length=64)
-    title: str = Field(default="新对话", max_length=256)
-    provider_id: str | None = Field(default=None, max_length=64)
-    model: str | None = Field(default=None, max_length=128)
-    annotation_project_id: str | None = Field(default=None, max_length=64)
-    interaction_mode: Literal["chat", "annotation"] | None = None
-
-
-class AgentMessageBlockPatchRequest(BaseModel):
-    block_type: str | None = Field(default=None, max_length=64)
-    block_index: int | None = Field(default=None, ge=0)
-    patch: dict[str, Any] = Field(default_factory=dict)
-
-
-class AnnotationRunStartRequest(BaseModel):
-    provider_id: str = Field(min_length=1, max_length=64)
-    session_id: str = Field(min_length=1, max_length=64)
-    client_job_id: str = Field(min_length=1, max_length=64)
-    user_content: str = Field(min_length=1)
-    user_message_id: str = Field(min_length=1, max_length=64)
-    assistant_message_id: str = Field(min_length=1, max_length=64)
-    truncate_from_message_id: str | None = None
-    client_context: ClientContextInput | None = None
-
-
-class AnnotationRunEventsRequest(BaseModel):
-    session_id: str = Field(min_length=1, max_length=64)
-    assistant_message_id: str = Field(min_length=1, max_length=64)
-    client_job_id: str = Field(min_length=1, max_length=64)
-    events: list[dict[str, Any]] = Field(default_factory=list)
-    seq: int | None = Field(default=None, ge=0)
-
-
-class AnnotationRunFinalizeRequest(BaseModel):
-    session_id: str = Field(min_length=1, max_length=64)
-    assistant_message_id: str = Field(min_length=1, max_length=64)
-    client_job_id: str = Field(min_length=1, max_length=64)
-    status: Literal["done", "error", "stopped"] = "done"
-    error: str | None = Field(default=None, max_length=4000)
-    user_content: str | None = Field(default=None, max_length=20_000)
-
-
-class AgentSessionPatchRequest(BaseModel):
-    title: str | None = Field(default=None, max_length=256)
-    provider_id: str | None = Field(default=None, max_length=64)
-    model: str | None = Field(default=None, max_length=128)
-
-
-class AgentMessagePublic(BaseModel):
-    id: str
-    session_id: str
-    role: str
-    blocks: list[dict[str, Any]]
-    status: str
-    interaction_mode: str | None = None
-    provider_id: str = ""
-    model: str = ""
-    error: str | None = None
-    created_at: int
-    updated_at: int
-
-
-class AgentSessionPublic(BaseModel):
-    id: str
-    title: str
-    annotation_project_id: str | None = None
-    interaction_mode: str | None = None
-    provider_id: str = ""
-    model: str = ""
-    message_ids: list[str] = Field(default_factory=list)
-    message_count: int = 0
-    last_message_preview: str | None = None
-    context_summary: str | None = None
-    summary_up_to_message_id: str | None = None
-    last_context_token_estimate: int | None = None
-    created_at: int
-    updated_at: int
-
-
-class AgentSessionListResponse(BaseModel):
-    sessions: list[AgentSessionPublic]
-    next_cursor: str | None = None
-    has_more: bool = False
-
-
-class AgentSessionDetailResponse(BaseModel):
-    session: AgentSessionPublic
-    messages: list[AgentMessagePublic]
-    has_more_before: bool = False
 
 
 class ChatCancelRequest(BaseModel):
@@ -219,13 +87,7 @@ class ClientToolCallPayload(BaseModel):
 
 
 class StreamEventPayload(BaseModel):
-    """SSE 流事件载荷。type 枚举：
-      text_delta / reasoning_delta / tool_start / tool_result /
-      preparing / context_updated / route_decided /
-      file_proposal_start / file_proposal_delta / document_proposal / file_proposal /
-      annotation_progress / annotation_proposal /
-      analysis_script_proposal / tool_pending / error / done
-    """
+    """SSE 流事件载荷。"""
 
     type: str
     content: str | None = None
@@ -246,50 +108,7 @@ class StreamEventPayload(BaseModel):
     domain: str | None = None
     target: str | None = None
     reason: str | None = None
-    # tool_pending 专用字段：异步客户端工具调用清单
     client_tool_calls: list[ClientToolCallPayload] | None = None
-
-    @classmethod
-    def from_client_dict(cls, data: dict[str, Any]) -> "StreamEventPayload":
-        event_type = str(data.get("type") or "")
-        content = data.get("content")
-        detail = data.get("detail")
-        message = data.get("message")
-        if event_type == "analysis_script_proposal":
-            content = data.get("script") or content
-            detail = data.get("explanation") or detail
-            message = data.get("error") or message
-        image_path = data.get("imagePath") or data.get("image_path")
-        summary = data.get("summary")
-        if event_type in ("file_proposal_start", "document_proposal", "file_proposal"):
-            content = data.get("content") or content
-            detail = data.get("title") or detail
-            image_path = data.get("suggestedRelativePath") or data.get("suggested_relative_path") or image_path
-            summary = data.get("title") or summary
-        domain = data.get("domain")
-        if event_type == "annotation_progress":
-            domain = data.get("pipelineKind") or data.get("pipeline_kind") or domain
-        return cls(
-            type=event_type,
-            content=content,
-            stage=data.get("stage"),
-            status=data.get("status"),
-            detail=detail,
-            proposal=data.get("proposal"),
-            summary=summary,
-            summary_up_to_message_id=data.get("summaryUpToMessageId") or data.get("summary_up_to_message_id"),
-            token_estimate=data.get("tokenEstimate") or data.get("token_estimate"),
-            tool_call_id=data.get("toolCallId") or data.get("tool_call_id"),
-            name=data.get("name"),
-            arguments=data.get("arguments"),
-            result=data.get("result"),
-            message=message,
-            image_path=image_path,
-            mode=data.get("mode"),
-            domain=domain,
-            target=data.get("target"),
-            reason=data.get("reason"),
-        )
 
     def to_sse_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"type": self.type}
@@ -347,11 +166,11 @@ class StreamEventPayload(BaseModel):
         if self.client_tool_calls is not None:
             serialized = [
                 {
-                    "toolCallId": c.tool_call_id,
-                    "name": c.name,
-                    "arguments": c.arguments,
+                    "toolCallId": call.tool_call_id,
+                    "name": call.name,
+                    "arguments": call.arguments,
                 }
-                for c in self.client_tool_calls
+                for call in self.client_tool_calls
             ]
             data["clientToolCalls"] = serialized
             data["toolCalls"] = serialized

@@ -50,6 +50,15 @@ def test_valid_mapping_passes():
     assert result.ok
 
 
+def test_empty_label_id_allowed_in_mapping_list():
+    mappings = [
+        {"box_index": 0, "label_id": "b", "reason": "勒布朗·詹姆斯"},
+        {"box_index": 1, "label_id": "", "reason": "无法确定"},
+    ]
+    result = validate_vision_mappings(mappings, CANDIDATES, instance_labels=True)
+    assert result.ok
+
+
 def test_candidates_for_retry_excludes_used():
     filtered = candidates_for_retry_box(CANDIDATES, {"a", "b"}, keep_label_id="")
     ids = {c["id"] for c in filtered}

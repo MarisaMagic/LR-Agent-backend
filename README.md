@@ -1,6 +1,14 @@
 # LR-Agent Backend
 
-FastAPI 后端服务，为 LR-Agent Electron 客户端提供用户认证与资料管理 API。
+FastAPI 后端服务，为 LR-Agent Electron 客户端提供用户认证、Assist 对话编排与标注 LLM 能力。
+
+## 架构说明
+
+- **Electron 本地**：Agent 会话/消息、LLM Provider 配置（SQLite）
+- **后端云端**：
+  - 用户认证与资料（auth / users）
+  - Assist 工具模式 SSE（`/agent/chat/stream`）
+  - 标注/分析/质量报告 LLM 微服务（请求体直传 `api_key/base_url/model`）
 
 ## 技术栈
 
@@ -8,6 +16,7 @@ FastAPI 后端服务，为 LR-Agent Electron 客户端提供用户认证与资�
 - SQLAlchemy 2.0 (async) + Alembic
 - PostgreSQL 17 + Redis 7 + MinIO
 - JWT (Access + Refresh) + Argon2
+- LangChain（Assist 与标注 LLM 编排）
 
 ## 快速开始
 
@@ -66,42 +75,36 @@ app/
 ├── main.py              # FastAPI 入口
 ├── core/                # 配置、安全、依赖注入
 ├── db/                  # 数据库会话、Redis 连接
-├── models/              # SQLAlchemy 模型
+├── models/              # SQLAlchemy 模型（users）
 ├── schemas/             # Pydantic DTO
-├── api/v1/              # 路由（auth、users）
+├── agent/               # Assist / 标注 / 分析 LLM 逻辑
+├── api/v1/              # 路由
 ├── services/            # 业务逻辑
 └── middleware/          # 限流等中间件
 ```
 
-## Phase 1 已实现
+## 已实现能力
+
+### 用户与账号
 
 - 用户注册 / 登录 / 刷新 / 登出
 - 邮箱验证、忘记/重置密码
 - `GET/PATCH /users/me`
+- MinIO 头像上传
 - Redis refresh token 轮换与 reuse 检测
-- 基础限流中间件
 
-## Phase 3 已实现（Agent P0/P1）
+### Agent Assist
 
-- `GET/POST/PATCH/DELETE /api/v1/llm-providers` 大模型配置（API Key 使用 `LLM_SECRETS_MASTER_KEY` 加密，与 JWT `SECRET_KEY` 分离）
-- Agent 安全：SSRF 校验 `base_url`、`/agent/chat/cancel` 需登录且 job 归属校验、流式限流、SSE 错误脱敏
-- 删除会话级联删除消息；Redis 缓存 key 含 `user_id`
-- `POST /api/v1/llm-providers/{id}/default` 设置默认模型
-- `POST /api/v1/agent/chat/stream` SSE 流式对话（LangChain）
-- `POST /api/v1/agent/chat/cancel` 取消生成任务
-- `GET/POST/PATCH/DELETE /api/v1/agent/sessions` 会话 CRUD（列表游标分页 + 摘要字段）
-- `GET /api/v1/agent/sessions/{id}` 会话详情（消息 `before_message_id` 分页，默认最近 N 条）
-- 聊天记录 PostgreSQL 持久化 + Redis 热缓存
-- 意图路由（chat / assist）与只读轻工具（账户、帮助、客户端上下文）
+- `POST /api/v1/agent/chat/stream` — 无状态 SSE（前端直传 Provider 配置）
+- `POST /api/v1/agent/chat/cancel` — 取消生成任务
+- Assist 工具循环（工作区搜索、文件读取、MCP 等）
 
-## Phase 2 已实现
+### 标注 / 分析 / 质量 LLM
 
-- MinIO 头像上传（JPEG/PNG/WebP，Pillow 校验，多尺寸 WebP）
-- `POST/DELETE /users/me/avatar`
-- SMTP 邮件（未配置 SMTP 时回退为日志 mock）
-- `POST /auth/revoke-all-sessions` 撤销所有设备
-- `user_sessions` 审计表（IP、User-Agent、revoked_at）
-- Docker 启动时自动迁移
+- `POST /api/v1/agent/annotation/*` — 批量准备、标签映射、评判等
+- `POST /api/v1/agent/analysis/prepare` — 数据分析脚本生成
+- `POST /api/v1/agent/analysis/summarize/stream` — 分析结果解读
+- `POST /api/v1/agent/annotation-quality/report/compose/stream` — 质量报告撰写
 
 ## API 概览
 
@@ -119,6 +122,11 @@ app/
 | GET/PATCH | `/api/v1/users/me` | 用户资料 |
 | POST/DELETE | `/api/v1/users/me/avatar` | 头像上传/删除 |
 | POST | `/api/v1/users/me/delete-account` | 注销账号（软删除，需密码） |
+| POST | `/api/v1/agent/chat/stream` | Assist SSE 流式对话 |
+| POST | `/api/v1/agent/chat/cancel` | 取消 Assist 任务 |
+| POST | `/api/v1/agent/annotation/*` | 标注 LLM 服务 |
+| POST | `/api/v1/agent/analysis/*` | 数据分析 LLM 服务 |
+| POST | `/api/v1/agent/annotation-quality/*` | 质量报告 LLM 服务 |
 
 ## 测试
 

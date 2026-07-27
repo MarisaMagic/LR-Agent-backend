@@ -54,11 +54,15 @@ def build_batch_plan_from_data(
     )
 
     sub_raw = data.get("sub_agent_constraints") if isinstance(data.get("sub_agent_constraints"), dict) else {}
+    instance_labels = labels_require_vision_mapping(label_candidates)
+    default_allow_unlabeled = instance_labels
     sub_constraints = SubAgentConstraintsPayload(
         require_per_box_mapping=bool(
             sub_raw.get("require_per_box_mapping", label_strategy == "map_each_box_to_label")
         ),
-        allow_unlabeled_boxes=bool(sub_raw.get("allow_unlabeled_boxes", False)),
+        allow_unlabeled_boxes=bool(
+            sub_raw.get("allow_unlabeled_boxes", default_allow_unlabeled)
+        ),
         min_labeled_box_count=max(1, int(sub_raw.get("min_labeled_box_count", 1))),
     )
 

@@ -24,7 +24,7 @@ class DetectionHintsPayload(BaseModel):
 
 class SubAgentConstraintsPayload(BaseModel):
     require_per_box_mapping: bool = True
-    allow_unlabeled_boxes: bool = False
+    allow_unlabeled_boxes: bool = True
     min_labeled_box_count: int = 1
 
 

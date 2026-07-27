@@ -1,23 +1,20 @@
 import logging
-import uuid
 
 from fastapi import APIRouter, HTTPException, status
+from langchain_openai import ChatOpenAI
 from openai import BadRequestError
 
 from app.agent.annotation import (
-    judge_detection_labels,
-    prepare_batch_annotation,
     heuristic_map_boxes,
+    judge_detection_labels,
     map_detection_boxes_to_labels_unified,
+    prepare_batch_annotation,
 )
-from app.agent.annotation.mutation_prepare_service import prepare_mutation_annotation
 from app.agent.annotation.debug_log import log_annotation_agent
 from app.agent.annotation.image_bytes_loader import load_image_bytes
+from app.agent.annotation.mutation_prepare_service import prepare_mutation_annotation
 from app.agent.annotation.schemas import AnnotationScopePayload
-from app.agent.llm_factory import build_chat_model
-from app.agent.conversation_context import load_conversation_transcript
-from app.core.deps import CurrentUser, DbSession, RedisClient, SettingsDep
-from app.services.agent_chat_repository import AgentChatRepository
+from app.core.deps import CurrentUser, SettingsDep
 from app.schemas.annotation_agent import (
     BatchPrepareRequest,
     HeuristicMapRequest,
@@ -25,7 +22,6 @@ from app.schemas.annotation_agent import (
     MapDetectionBoxesRequest,
     MutationPrepareRequest,
 )
-from app.services.llm_provider_service import LlmProviderService
 
 logger = logging.getLogger(__name__)
 
@@ -51,46 +47,27 @@ def _http_from_llm_error(exc: Exception) -> HTTPException:
     )
 
 
-async def _llm_for_provider(
-    db: DbSession,
-    settings: SettingsDep,
-    user_id: uuid.UUID,
-    provider_id: str,
+def _require_direct_llm(
     *,
-    temperature: float = 0.0,
-    api_key_direct: str = "",
-    base_url_direct: str = "",
-    model_direct: str = "",
-):
-    # 前端直传模式：跳过 DB 查询
-    if api_key_direct.strip() and base_url_direct.strip() and model_direct.strip():
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=model_direct.strip(),
-            api_key=api_key_direct.strip(),
-            base_url=base_url_direct.strip().rstrip("/"),
-            streaming=False,
-            temperature=temperature,
-            timeout=120,
+    api_key: str,
+    base_url: str,
+    model: str,
+    temperature: float,
+    streaming: bool = False,
+) -> ChatOpenAI:
+    if not api_key.strip() or not base_url.strip() or not model.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="provider_credentials_required",
         )
-
-    svc = LlmProviderService(db, settings)
-    try:
-        provider_uuid = uuid.UUID(provider_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_provider_id") from exc
-
-    row = await svc.get_for_user(provider_uuid, user_id)
-    if row is None or not row.enabled:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="llm_provider_not_found")
-
-    try:
-        svc.validate_provider_base_url(row)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_base_url") from exc
-
-    api_key = svc.decrypt_api_key(row)
-    return build_chat_model(row, api_key, streaming=False, temperature=temperature)
+    return ChatOpenAI(
+        model=model.strip(),
+        api_key=api_key.strip(),
+        base_url=base_url.strip().rstrip("/"),
+        streaming=streaming,
+        temperature=temperature,
+        timeout=120,
+    )
 
 
 @router.post("/map-heuristic", summary="启发式检测框映射（无 LLM）")
@@ -111,50 +88,36 @@ async def api_map_heuristic(
 async def api_mutation_prepare(
     body: MutationPrepareRequest,
     current_user: CurrentUser,
-    db: DbSession,
-    redis: RedisClient,
     settings: SettingsDep,
 ):
+    del current_user
     if not settings.agent_mutation_enabled:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="agent_mutation_disabled",
         )
     try:
-        llm = await _llm_for_provider(
-            db,
-            settings,
-            current_user.id,
-            body.provider_id,
+        llm = _require_direct_llm(
+            api_key=body.api_key,
+            base_url=body.base_url,
+            model=body.model,
             temperature=settings.annotation_prepare_temperature,
-            api_key_direct=body.api_key,
-            base_url_direct=body.base_url,
-            model_direct=body.model,
         )
         label_names = None
         if body.project is not None:
             label_names = [
-                str(l.get("name") or "")
-                for l in (body.project.labels or [])
-                if str(l.get("name") or "").strip()
+                str(label.get("name") or "")
+                for label in (body.project.labels or [])
+                if str(label.get("name") or "").strip()
             ]
-        repo = AgentChatRepository(db, redis, settings)
-        conversation_transcript = await load_conversation_transcript(
-            repo,
-            body.session_id,
-            user_id=current_user.id,
-            user_request=body.user_request,
-            max_turns_in_window=settings.agent_default_max_turns_in_window,
-        )
 
         result = await prepare_mutation_annotation(
             llm,
             user_request=body.user_request,
             current_relative_path=(body.current_relative_path or "").strip(),
-            candidates=[c.model_dump() for c in body.candidates],
+            candidates=[candidate.model_dump() for candidate in body.candidates],
             label_names=label_names or [],
             selected_annotation_ids=body.selected_annotation_ids or None,
-            conversation_transcript=conversation_transcript,
         )
         return {
             "data": {
@@ -172,58 +135,33 @@ async def api_mutation_prepare(
 async def api_batch_prepare(
     body: BatchPrepareRequest,
     current_user: CurrentUser,
-    db: DbSession,
-    redis: RedisClient,
     settings: SettingsDep,
 ):
+    del current_user
     try:
-        llm = await _llm_for_provider(
-            db,
-            settings,
-            current_user.id,
-            body.provider_id,
+        llm = _require_direct_llm(
+            api_key=body.api_key,
+            base_url=body.base_url,
+            model=body.model,
             temperature=settings.annotation_prepare_temperature,
-            api_key_direct=body.api_key,
-            base_url_direct=body.base_url,
-            model_direct=body.model,
         )
-        is_direct = bool(body.api_key.strip() and body.base_url.strip() and body.model.strip())
-        if is_direct:
-            provider_is_vision = body.supports_vision
-        else:
-            svc = LlmProviderService(db, settings)
-            provider_uuid = uuid.UUID(body.provider_id)
-            row = await svc.get_for_user(provider_uuid, current_user.id)
-            if row is None:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="llm_provider_not_found")
-            provider_is_vision = await svc.ensure_vision_probed(row)
+        provider_is_vision = body.supports_vision
 
         label_names = None
         project_name = None
         if body.project is not None:
             project_name = body.project.name or None
             label_names = [
-                str(l.get("name") or "")
-                for l in (body.project.labels or [])
-                if str(l.get("name") or "").strip()
+                str(label.get("name") or "")
+                for label in (body.project.labels or [])
+                if str(label.get("name") or "").strip()
             ]
-        user_request = body.user_request
-        conversation_transcript = ""
-        if not body.preselected_paths:
-            repo = AgentChatRepository(db, redis, settings)
-            conversation_transcript = await load_conversation_transcript(
-                repo,
-                body.session_id,
-                user_id=current_user.id,
-                user_request=body.user_request,
-                max_turns_in_window=settings.agent_default_max_turns_in_window,
-            )
 
         current_rel = (body.current_relative_path or "").strip()
-        candidates = [c.model_dump() for c in body.candidates]
+        candidates = [candidate.model_dump() for candidate in body.candidates]
         result = await prepare_batch_annotation(
             llm,
-            user_request=user_request,
+            user_request=body.user_request,
             current_relative_path=current_rel,
             candidates=candidates,
             label_candidates=body.label_candidates,
@@ -233,16 +171,16 @@ async def api_batch_prepare(
             provider_is_vision=provider_is_vision,
             project_name=project_name,
             label_names=label_names,
-            conversation_transcript=conversation_transcript,
             preselected_paths=body.preselected_paths or None,
         )
         payload = {
             "selected_paths": result.selected_paths,
             "scope_reason": result.scope_reason,
-            "resolved_user_request": user_request,
+            "resolved_user_request": body.user_request,
             "judge_config": {
                 "enabled": settings.annotation_judge_enabled and provider_is_vision,
                 "max_retries": settings.annotation_judge_max_retries,
+                "reject_submit_partial": settings.annotation_judge_reject_submit_partial,
             },
             **result.plan.model_dump(),
         }
@@ -257,46 +195,29 @@ async def api_batch_prepare(
 async def api_map_detection_boxes(
     body: MapDetectionBoxesRequest,
     current_user: CurrentUser,
-    db: DbSession,
     settings: SettingsDep,
 ):
+    del current_user
     try:
-        is_direct = bool(body.api_key.strip() and body.base_url.strip() and body.model.strip())
-        if is_direct:
-            provider_is_vision = body.supports_vision
-            provider_name = body.model
-            provider_model = body.model
-        else:
-            svc = LlmProviderService(db, settings)
-            row = await svc.get_for_user(uuid.UUID(body.provider_id), current_user.id)
-            if row is None:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="llm_provider_not_found")
-            provider_is_vision = await svc.ensure_vision_probed(row)
-            provider_name = row.name
-            provider_model = row.model
-            vision_probe_detail = row.vision_probe_detail
+        provider_is_vision = body.supports_vision
         use_vision_requested = bool(body.use_vision)
         use_vision = use_vision_requested and provider_is_vision
         llm = None
         if use_vision:
-            llm = await _llm_for_provider(
-                db,
-                settings,
-                current_user.id,
-                body.provider_id,
+            llm = _require_direct_llm(
+                api_key=body.api_key,
+                base_url=body.base_url,
+                model=body.model,
                 temperature=settings.annotation_llm_temperature,
-                api_key_direct=body.api_key,
-                base_url_direct=body.base_url,
-                model_direct=body.model,
             )
         log_annotation_agent(
             "map-api",
             "map-detection-boxes 请求",
             provider_id=body.provider_id,
-            provider_name=provider_name,
-            provider_model=provider_model,
+            provider_name=body.model,
+            provider_model=body.model,
             provider_is_vision=provider_is_vision,
-            vision_probe_detail=vision_probe_detail if not is_direct else "direct",
+            vision_probe_detail="direct",
             use_vision_requested=use_vision_requested,
             use_vision_effective=use_vision,
             box_count=len(body.boxes),
@@ -307,7 +228,10 @@ async def api_map_detection_boxes(
                 )[0]
             ),
             image_absolute_path=bool(body.image_absolute_path.strip()),
-            label_names=[str(c.get("name") or "") for c in (body.label_candidates or [])[:20]],
+            label_names=[
+                str(candidate.get("name") or "")
+                for candidate in (body.label_candidates or [])[:20]
+            ],
         )
         scope = AnnotationScopePayload.model_validate(body.annotation_scope or {})
         result = await map_detection_boxes_to_labels_unified(
@@ -350,9 +274,9 @@ async def api_map_detection_boxes(
 async def api_judge_detection_labels(
     body: JudgeDetectionLabelsRequest,
     current_user: CurrentUser,
-    db: DbSession,
     settings: SettingsDep,
 ):
+    del current_user
     try:
         if not settings.annotation_judge_enabled:
             return {
@@ -366,15 +290,7 @@ async def api_judge_detection_labels(
                     "checked_boxes": len(body.boxes),
                 }
             }
-        is_direct = bool(body.api_key.strip() and body.base_url.strip() and body.model.strip())
-        if is_direct:
-            provider_is_vision = body.supports_vision
-        else:
-            svc = LlmProviderService(db, settings)
-            row = await svc.get_for_user(uuid.UUID(body.provider_id), current_user.id)
-            if row is None:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="llm_provider_not_found")
-            provider_is_vision = await svc.ensure_vision_probed(row)
+        provider_is_vision = body.supports_vision
         if not provider_is_vision:
             return {
                 "data": {
@@ -388,15 +304,11 @@ async def api_judge_detection_labels(
                     "checked_boxes": 0,
                 }
             }
-        llm = await _llm_for_provider(
-            db,
-            settings,
-            current_user.id,
-            body.provider_id,
+        llm = _require_direct_llm(
+            api_key=body.api_key,
+            base_url=body.base_url,
+            model=body.model,
             temperature=settings.annotation_judge_temperature,
-            api_key_direct=body.api_key,
-            base_url_direct=body.base_url,
-            model_direct=body.model,
         )
         result = await judge_detection_labels(
             llm,

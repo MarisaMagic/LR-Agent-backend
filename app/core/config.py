@@ -61,18 +61,9 @@ class Settings(BaseSettings):
     agent_default_max_turns_in_window: int = 20
     agent_default_summarize_trigger_ratio: float = 0.85
     agent_default_min_turns_before_summarize: int = 6
-    agent_chat_cache_ttl_seconds: int = 2_592_000
-    agent_chat_sessions_index_limit: int = 500
-    agent_session_list_default_limit: int = 50
-    agent_session_list_max_limit: int = 100
-    agent_message_page_default_limit: int = 50
-    agent_message_page_max_limit: int = 100
     agent_stream_rate_limit_per_minute: int = 10
     agent_stream_rate_limit_per_day: int = 200
-    agent_session_write_rate_limit_per_hour: int = 60
 
-    llm_secrets_master_key: str | None = None
-    llm_secrets_active_key_id: str = "v1"
     llm_base_url_allow_http: bool = False
 
     # When true, batch annotation follows fusion-reasoning tool chain (ReAct sub-agent).
@@ -83,9 +74,10 @@ class Settings(BaseSettings):
     annotation_llm_temperature: float = 0.0
     annotation_prepare_temperature: float = 0.1
     annotation_vision_map_validate: bool = True
-    annotation_vision_map_max_retries: int = 2
+    annotation_vision_map_max_retries: int = 1
     annotation_judge_enabled: bool = True
-    annotation_judge_max_retries: int = 3
+    annotation_judge_max_retries: int = 1
+    annotation_judge_reject_submit_partial: bool = True
     annotation_judge_temperature: float = 0.0
     annotation_label_pool_preflight: Literal["off", "auto", "always"] = "auto"
     annotation_label_pool_preflight_min_extra: int = 2

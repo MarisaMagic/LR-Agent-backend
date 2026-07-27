@@ -12,10 +12,6 @@ os.environ.setdefault("APP_ENV", "testing")
 # 测试不走真实 SMTP（.env 中 SMTP_HOST 会被覆盖为空，EmailService 仅打 mock 日志）
 os.environ["SMTP_HOST"] = ""
 
-from cryptography.fernet import Fernet
-
-os.environ.setdefault("LLM_SECRETS_MASTER_KEY", Fernet.generate_key().decode())
-
 from app.core.config import get_settings
 from app.core.deps import get_redis
 from app.db.session import get_db

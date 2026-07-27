@@ -10,62 +10,34 @@ from app.agent.annotation.quality_report_compose_service import (
     stream_quality_report_compose,
 )
 from app.agent.text_sanitize import sanitize_json_value
-from app.agent.llm_factory import build_chat_model
-from app.core.deps import CurrentUser, DbSession, RedisClient, SettingsDep
+from app.core.deps import CurrentUser, RedisClient, SettingsDep
 from app.schemas.annotation_quality import QualityReportComposeRequest
 from app.services.agent_rate_limit import check_agent_stream_limit
-from app.services.llm_provider_service import LlmProviderService
-import uuid
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent/annotation-quality", tags=["annotation-quality"])
 
 
-async def _llm_for_provider(
-    db: DbSession,
-    settings: SettingsDep,
-    user_id: uuid.UUID,
-    provider_id: str,
+def _require_direct_llm(
     *,
-    api_key_direct: str = "",
-    base_url_direct: str = "",
-    model_direct: str = "",
-):
-    # 前端直传模式：Electron 本地 provider 配置，跳过 DB 查询
-    if api_key_direct.strip() and base_url_direct.strip() and model_direct.strip():
-        return ChatOpenAI(
-            model=model_direct.strip(),
-            api_key=api_key_direct.strip(),
-            base_url=base_url_direct.strip().rstrip("/"),
-            streaming=True,
-            temperature=0.2,
-            timeout=120,
+    api_key: str,
+    base_url: str,
+    model: str,
+) -> ChatOpenAI:
+    if not api_key.strip() or not base_url.strip() or not model.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="provider_credentials_required",
         )
-
-    svc = LlmProviderService(db, settings)
-    try:
-        provider_uuid = uuid.UUID(provider_id)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_provider_id"
-        ) from exc
-
-    row = await svc.get_for_user(provider_uuid, user_id)
-    if row is None or not row.enabled:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="llm_provider_not_found"
-        )
-
-    try:
-        svc.validate_provider_base_url(row)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_base_url"
-        ) from exc
-
-    api_key = svc.decrypt_api_key(row)
-    return build_chat_model(row, api_key, streaming=True, temperature=0.2)
+    return ChatOpenAI(
+        model=model.strip(),
+        api_key=api_key.strip(),
+        base_url=base_url.strip().rstrip("/"),
+        streaming=True,
+        temperature=0.2,
+        timeout=120,
+    )
 
 
 def _validate_compose_payload(payload: dict, settings: SettingsDep) -> None:
@@ -103,21 +75,17 @@ async def _compose_sse(
 async def api_quality_report_compose_stream(
     body: QualityReportComposeRequest,
     current_user: CurrentUser,
-    db: DbSession,
     redis: RedisClient,
     settings: SettingsDep,
 ) -> StreamingResponse:
+    del current_user
     _validate_compose_payload(body.compose_payload, settings)
     await check_agent_stream_limit(redis, settings, current_user.id)
 
-    llm = await _llm_for_provider(
-        db,
-        settings,
-        current_user.id,
-        body.provider_id,
-        api_key_direct=body.api_key,
-        base_url_direct=body.base_url,
-        model_direct=body.model,
+    llm = _require_direct_llm(
+        api_key=body.api_key,
+        base_url=body.base_url,
+        model=body.model,
     )
 
     return StreamingResponse(

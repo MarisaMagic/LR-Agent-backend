@@ -32,7 +32,8 @@ BATCH_PREPARE_SYSTEM = """你是批量图片 bbox 标注的准备助手（一次
 子 Agent 工具链：run_object_detection → map_detection_boxes_to_labels → finalize_image_change
 
 硬性要求：
-- 只提交 map 成功且含 label_id 的框（allow_unlabeled_boxes=false）
+- 不确定的框可留空 label_id（allow_unlabeled_boxes=true 时仍进入提案，供人工补标）
+- 实例/细粒度标签（球员名等）默认 allow_unlabeled_boxes=true、min_labeled_box_count=1
 - label_strategy=single_label_for_all_boxes 仅当用户明确要求所有框同一标签
 - 标签名为具体实例（球员名等）且与 YOLO 类名不一致时，use_vision_mapping=true（需视觉探针通过）
 - 用户说置信度/IoU/模型名时写入 detection_hints
@@ -53,7 +54,7 @@ BATCH_PREPARE_SYSTEM = """你是批量图片 bbox 标注的准备助手（一次
   "label_strategy": "map_each_box_to_label|single_label_for_all_boxes",
   "use_vision_mapping": false,
   "detection_hints": {"needs_object_detection": true, "model_id": null, "conf_threshold": null, "iou_threshold": null, "notes": ""},
-  "sub_agent_constraints": {"require_per_box_mapping": true, "allow_unlabeled_boxes": false, "min_labeled_box_count": 1},
+  "sub_agent_constraints": {"require_per_box_mapping": true, "allow_unlabeled_boxes": true, "min_labeled_box_count": 1},
   "annotation_scope": {"scope_summary": "", "include_detection_labels": [], "exclude_detection_labels": [], "include_label_names": [], "exclude_label_names": []},
   "plan_steps": ["简要步骤"]
 }"""
