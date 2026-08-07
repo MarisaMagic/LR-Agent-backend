@@ -16,7 +16,7 @@ def test_infer_write_workspace_file():
 
 def test_infer_yolo_detect():
     cap = _infer_mcp_capability("yolo_detect")
-    assert cap == ToolCapability.DETECT_BATCH
+    assert cap == ToolCapability.AUTO_ANNOTATE
 
 
 def test_infer_list_project_images():

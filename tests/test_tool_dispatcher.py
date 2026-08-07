@@ -10,7 +10,7 @@ def test_get_tool_runner_write_is_proposal() -> None:
 
 
 def test_get_tool_runner_batch_is_async() -> None:
-    assert get_tool_runner("execute_batch_annotation") is ToolRunner.ASYNC
+    assert get_tool_runner("auto_annotate") is ToolRunner.ASYNC
 
 
 def test_resolve_api_only_tool_calls() -> None:
@@ -27,10 +27,10 @@ def test_resolve_empty_api_returns_empty() -> None:
 
 
 def test_resolve_skips_completed() -> None:
-    api = [{"id": "t1", "name": "execute_batch_annotation", "args": {}}]
+    api = [{"id": "t1", "name": "auto_annotate", "args": {}}]
     calls = resolve_round_tool_calls(
         api_tool_calls=api,
-        completed_tools=frozenset({"execute_batch_annotation"}),
+        completed_tools=frozenset({"auto_annotate"}),
     )
     assert calls == []
 
@@ -40,13 +40,13 @@ def test_split_immediate_and_async() -> None:
 
     calls = [
         ResolvedToolCall("t1", "write_workspace_file", {"relative_path": "a.md", "content": "x"}, "api"),
-        ResolvedToolCall("t2", "execute_batch_annotation", {"user_request": "标注"}, "api"),
+        ResolvedToolCall("t2", "auto_annotate", {"user_request": "标注"}, "api"),
     ]
     split = split_resolved_calls(calls)
     assert len(split.immediate) == 1
     assert split.immediate[0].name == "write_workspace_file"
     assert len(split.async_pending) == 1
-    assert split.async_pending[0].name == "execute_batch_annotation"
+    assert split.async_pending[0].name == "auto_annotate"
 
 
 def test_build_tool_result_shape() -> None:

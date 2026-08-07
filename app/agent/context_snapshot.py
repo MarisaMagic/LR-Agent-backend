@@ -1,11 +1,30 @@
 """Assist 模式系统提示词组装：运行时身份、任务指令与客户端上下文快照。"""
 from __future__ import annotations
 
-from app.schemas.agent import AnnotationProjectSnapshotInput, ClientContextInput
+from app.schemas.agent import AnnotationProjectSnapshotInput, ClientContextInput, SkillCatalogEntryInput
 
 # 精简后的 prompt 常量 —— 规则由代码层承担，不靠模型理解
 VISION_HINT = """- 看图描述：按需调用 read_image_for_vision。
 - 查已有标注 JSON：read_file_annotation。"""
+
+# 不同标注类型的工具使用指导
+ANNOTATION_TOOL_GUIDE = {
+    "bbox": "【标注工具】使用 auto_annotate 执行自动标注。scope_hint 从目录浏览结果中取 relativePath 值。",
+    "caption": "【标注工具】使用 auto_annotate 执行自动标注。scope_hint 从目录浏览结果中取 relativePath 值。",
+    "classification": "【标注工具】使用 auto_annotate 执行自动标注。scope_hint 从目录浏览结果中取 relativePath 值。",
+    "polygon": "【标注工具】使用 auto_annotate 执行自动标注。scope_hint 从目录浏览结果中取 relativePath 值。需配置检测模型与 SAM2 分割模型。",
+    "keypoint": "【标注工具】使用 auto_annotate 执行自动标注。scope_hint 从目录浏览结果中取 relativePath 值。需先选择骨架模板并配置关键点模型。",
+    "rotated_bbox": "【标注工具】使用 auto_annotate 执行自动标注。scope_hint 从目录浏览结果中取 relativePath 值。需配置 OBB 检测模型。",
+    "span_ner": "【标注工具】使用 auto_annotate 执行自动标注。scope_hint 从目录浏览结果中取 relativePath 值。",
+    "text_classification": "【标注工具】使用 auto_annotate 执行自动标注。scope_hint 从目录浏览结果中取 relativePath 值。",
+    "instruction": "【标注工具】使用 auto_annotate 执行自动标注。scope_hint 从目录浏览结果中取 relativePath 值。",
+    "preference": "【标注工具】使用 auto_annotate 执行自动标注。scope_hint 从目录浏览结果中取 relativePath 值。",
+    "conversation": "【标注工具】使用 auto_annotate 执行自动标注。scope_hint 从目录浏览结果中取 relativePath 值。",
+    "cot": "【标注工具】使用 auto_annotate 执行自动标注。scope_hint 从目录浏览结果中取 relativePath 值。",
+}
+
+# 不需要展示检测模型列表的标注类型
+_DETECTION_MODEL_TYPES: frozenset[str] = frozenset({"bbox", "polygon", "keypoint", "rotated_bbox"})
 
 WORKSPACE_ASSIST_TASK = """【任务】在 LR-Agent 内回答用户问题，按需使用工具完成读/写/分析操作。
 {vision_hint}
@@ -54,25 +73,34 @@ def format_snapshot_for_prompt(snapshot: AnnotationProjectSnapshotInput) -> str:
         for item in labels[:40]
         if isinstance(item, dict)
     ]
-    models = snapshot.detection_models or []
-    model_lines = [
-        f"- {m.get('id', '')}: {m.get('name', '')}"
-        + (" (默认)" if m.get("is_default") else "")
-        for m in models[:12]
-        if isinstance(m, dict)
+    annotation_type = snapshot.annotation_type or ""
+    lines = [
+        f"项目 ID: {snapshot.project_id}",
+        f"项目名称: {snapshot.name}",
+        f"模态: {snapshot.modality}",
+        f"标注类型: {annotation_type}",
+        "标签列表:",
+        *(label_lines or ["- （无）"]),
     ]
-    return "\n".join(
-        [
-            f"项目 ID: {snapshot.project_id}",
-            f"项目名称: {snapshot.name}",
-            f"模态: {snapshot.modality}",
-            f"标注类型: {snapshot.annotation_type}",
-            "标签列表:",
-            *(label_lines or ["- （无）"]),
-            "可用检测模型（object_detection）:",
-            *(model_lines or ["- （未配置或未传入）"]),
+
+    # 仅在目标检测类标注类型时展示可用的检测模型
+    if annotation_type in _DETECTION_MODEL_TYPES:
+        models = snapshot.detection_models or []
+        model_lines = [
+            f"- {m.get('id', '')}: {m.get('name', '')}"
+            + (" (默认)" if m.get("is_default") else "")
+            for m in models[:12]
+            if isinstance(m, dict)
         ]
-    )
+        lines.append("可用检测模型（object_detection）:")
+        lines.extend(model_lines or ["- （未配置或未传入）"])
+
+    # 追加工具使用指导
+    tool_guide = ANNOTATION_TOOL_GUIDE.get(annotation_type)
+    if tool_guide:
+        lines.append(tool_guide)
+
+    return "\n".join(lines)
 
 
 def build_workspace_assistant_system_prompt(client_context: ClientContextInput | None) -> str:
@@ -96,6 +124,27 @@ def build_project_assistant_system_prompt(client_context: ClientContextInput | N
         f"{task}\n\n"
         f"【当前标注项目快照】\n{format_snapshot_for_prompt(snap)}"
     )
+
+
+def format_skills_catalog_block(
+    skills: list[SkillCatalogEntryInput] | None,
+) -> str:
+    """把全局 skills catalog（name + description）格式化为 prompt 块；空时不输出。"""
+    if not skills:
+        return ""
+    lines = [
+        "【可用 Skills】",
+        "以下为可用的任务工作流 Skills。当用户请求与某 skill 的 description 匹配时，"
+        "先调用 read_agent_skill(skill_name) 读取该 SKILL.md 正文，再按其中步骤执行；"
+        "不要凭名字猜测内容。",
+    ]
+    for item in skills:
+        name = (item.name or "").strip()
+        desc = (item.description or "").strip()
+        if not name or not desc:
+            continue
+        lines.append(f"- {name}: {desc}")
+    return "\n".join(lines)
 
 
 def build_assist_system_prompt(
@@ -125,4 +174,21 @@ def build_assist_system_prompt(
             "可使用 read_workspace_file、write_workspace_file、read_document_file 等通用工具。"
         )
     base = f"{identity}\n\n{task}"
-    return f"{base}{editor_note}" if editor_note else base
+    if editor_note:
+        base = f"{base}{editor_note}"
+    instructions = (client_context.project_instructions or "").strip() if client_context else ""
+    if instructions:
+        base = f"{base}\n\n【项目指令】\n{instructions}"
+    memory_index = (client_context.memory_index or "").strip() if client_context else ""
+    if memory_index:
+        base = (
+            f"{base}\n\n【已保存的记忆】\n{memory_index}\n"
+            "（以上为跨会话记忆索引；需要细节时用 memory_read 读取对应 topic 文件。"
+            "当用户明确要求「记住」某事，或纠正了你的做法且该纠正具有长期价值时，"
+            "用 memory_write 保存简洁的 markdown 记忆并附索引行。项目指令优先级高于记忆。）"
+        )
+    skills = (client_context.skills_catalog or []) if client_context else []
+    skills_block = format_skills_catalog_block(skills)
+    if skills_block:
+        base = f"{base}\n\n{skills_block}"
+    return base

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from app.agent.tools.tool_registry_meta import LOCAL_CANONICAL_TOOL_NAMES, TOOL_RUNNERS
 
 _CLIENT_ASYNC_PATTERN = re.compile(
-    r"(execute_batch_annotation|mutate_annotation|analyze_data)\s*\(",
+    r"(auto_annotate|mutate_annotation|analyze_data)\s*\(",
     re.IGNORECASE,
 )
 

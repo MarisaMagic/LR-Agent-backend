@@ -118,6 +118,7 @@ async def api_mutation_prepare(
             candidates=[candidate.model_dump() for candidate in body.candidates],
             label_names=label_names or [],
             selected_annotation_ids=body.selected_annotation_ids or None,
+            conversation_transcript=body.conversation_transcript,
         )
         return {
             "data": {
@@ -171,6 +172,7 @@ async def api_batch_prepare(
             provider_is_vision=provider_is_vision,
             project_name=project_name,
             label_names=label_names,
+            conversation_transcript=body.conversation_transcript,
             preselected_paths=body.preselected_paths or None,
         )
         payload = {

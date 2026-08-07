@@ -14,11 +14,11 @@ def test_append_client_tool_results_adds_ai_and_tool_messages() -> None:
     results = [
         ClientToolResult(
             tool_call_id="call-1",
-            name="execute_batch_annotation",
+            name="auto_annotate",
             result=json.dumps(
                 {
                     "status": "completed",
-                    "tool": "execute_batch_annotation",
+                    "tool": "auto_annotate",
                     "user_request": "标注并生成报告",
                     "summary": "批量标注已完成",
                     "next_hint": "可继续 write_workspace_file",
@@ -39,7 +39,7 @@ def test_append_client_tool_results_adds_ai_and_tool_messages() -> None:
     tool_msg = lc_messages[3]
     assert isinstance(ai_msg, AIMessage)
     assert ai_msg.tool_calls
-    assert ai_msg.tool_calls[0]["name"] == "execute_batch_annotation"
+    assert ai_msg.tool_calls[0]["name"] == "auto_annotate"
     assert ai_msg.tool_calls[0]["id"] == "call-1"
     assert isinstance(tool_msg, ToolMessage)
     assert tool_msg.tool_call_id == "call-1"
@@ -53,7 +53,7 @@ def test_append_client_tool_results_cumulative_pairs() -> None:
     results = [
         ClientToolResult(
             tool_call_id="call-1",
-            name="execute_batch_annotation",
+            name="auto_annotate",
             result='{"status":"completed","summary":"标注完成"}',
         ),
         ClientToolResult(

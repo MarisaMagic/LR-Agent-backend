@@ -15,7 +15,10 @@ from PIL import Image
 
 from app.agent.tools.tool_result import build_tool_result, format_tool_result_for_display
 from app.agent.tools.workspace_path import resolve_workspace_file, resolve_workspace_write_path
-from app.agent.tools.workspace_text_extensions import is_allowed_text_extension
+from app.agent.tools.workspace_text_extensions import (
+    TEXT_BLOCKLIST_SUFFIXES,
+    is_allowed_text_extension,
+)
 from app.core.config import Settings
 from app.schemas.agent import ClientContextInput
 
@@ -25,38 +28,6 @@ WRITE_TOOL_NAME = "write_workspace_file"
 VISION_PATH_MARKER = "__vision_image_path__"
 # 工具结果 JSON 中的内部字段，assist_service 据此发出 file_proposal SSE 事件
 DOC_PROPOSAL_MARKER = "__doc_proposal__"
-
-# 禁止用 read_workspace_file 读取的二进制/专用格式
-TEXT_BLOCKLIST_SUFFIXES = frozenset(
-    {
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".gif",
-        ".webp",
-        ".bmp",
-        ".ico",
-        ".svg",
-        ".pdf",
-        ".docx",
-        ".doc",
-        ".zip",
-        ".rar",
-        ".7z",
-        ".exe",
-        ".dll",
-        ".so",
-        ".dylib",
-        ".mp3",
-        ".mp4",
-        ".avi",
-        ".mov",
-        ".woff",
-        ".woff2",
-        ".ttf",
-        ".otf",
-    }
-)
 
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico"})
 DOCUMENT_SUFFIXES = frozenset({".pdf", ".docx"})
@@ -312,8 +283,8 @@ def write_workspace_file_tool(
             tool=WRITE_TOOL_NAME,
             status="error",
             summary=(
-                f"write_workspace_file 不支持后缀 {suffix!r}。"
-                f"请使用常见文本/代码格式（如 .md .txt .json .py .cpp .ts 等）。"
+                f"write_workspace_file 不支持后缀 {suffix!r}（二进制/富媒体格式）。"
+                f"请使用 UTF-8 文本或代码文件。"
             ),
         )
 

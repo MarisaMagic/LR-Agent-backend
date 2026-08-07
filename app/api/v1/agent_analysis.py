@@ -30,6 +30,7 @@ class AnalysisPrepareRequest(BaseModel):
     user_request: str = Field(min_length=1, max_length=20_000)
     data_snapshot: dict = Field(default_factory=dict)
     session_id: str | None = Field(default=None, max_length=64)
+    conversation_transcript: str = Field(default="", max_length=24_000)
     repair_context: AnalysisRepairContext | None = None
 
 
@@ -40,6 +41,7 @@ class AnalysisSummarizeRequest(BaseModel):
     model: str = ""
     user_request: str = Field(min_length=1, max_length=20_000)
     session_id: str | None = Field(default=None, max_length=64)
+    conversation_transcript: str = Field(default="", max_length=24_000)
     script: str = Field(min_length=1, max_length=32_000)
     explanation: str = ""
     stdout: str = Field(default="", max_length=32_000)
@@ -106,6 +108,7 @@ async def api_analysis_prepare(
             llm,
             user_request=body.user_request,
             data_snapshot=sanitize_json_value(body.data_snapshot),
+            conversation_transcript=body.conversation_transcript,
             repair_context=body.repair_context,
         )
         return {"data": result.model_dump()}
@@ -126,6 +129,7 @@ async def _analysis_summarize_sse(
     explanation: str,
     script: str,
     stdout: str,
+    conversation_transcript: str,
     settings: SettingsDep,
 ) -> AsyncIterator[str]:
     try:
@@ -135,6 +139,7 @@ async def _analysis_summarize_sse(
             explanation=explanation,
             script=script,
             stdout=stdout,
+            conversation_transcript=conversation_transcript,
         ):
             yield f"data: {json.dumps(event.to_sse_dict(), ensure_ascii=False)}\n\n"
         yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
@@ -176,6 +181,7 @@ async def api_analysis_summarize_stream(
             explanation=body.explanation,
             script=body.script,
             stdout=body.stdout,
+            conversation_transcript=body.conversation_transcript,
             settings=settings,
         ),
         media_type="text/event-stream",

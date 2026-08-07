@@ -33,6 +33,13 @@ class AnnotationProjectSnapshotInput(BaseModel):
     project_directory_path: str | None = None
 
 
+class SkillCatalogEntryInput(BaseModel):
+    """全局 Agent Skill 目录条目（catalog，仅 name + description 注入 prompt）。"""
+
+    name: str = Field(min_length=1, max_length=128)
+    description: str = Field(max_length=512)
+
+
 class ClientContextInput(BaseModel):
     workspace_root: str | None = None
     active_file_path: str | None = None
@@ -47,6 +54,9 @@ class ClientContextInput(BaseModel):
     selected_annotation_ids: list[str] = Field(default_factory=list)
     annotation_project_snapshot: AnnotationProjectSnapshotInput | None = None
     mcp_server_url: str | None = None
+    project_instructions: str | None = None
+    memory_index: str | None = None
+    skills_catalog: list[SkillCatalogEntryInput] = Field(default_factory=list)
 
 
 class ClientToolResult(BaseModel):

@@ -5,6 +5,7 @@ Session/chat CRUD and LLM provider config live in the Electron frontend
 """
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -196,7 +197,7 @@ async def _stream_local_chat(body: LocalChatStreamRequest, settings) -> Any:
         async for event in stream:
             if await is_cancelled():
                 break
-            yield f"data: {event.model_dump_json(exclude_none=True)}\n\n"
+            yield f"data: {json.dumps(event.to_sse_dict(), ensure_ascii=False)}\n\n"
 
         yield 'data: {"type": "done"}\n\n'
 

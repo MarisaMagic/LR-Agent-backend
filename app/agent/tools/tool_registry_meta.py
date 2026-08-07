@@ -21,7 +21,7 @@ class ToolCapability(str, Enum):
     READ_IMAGE_VISION = "read_image_vision"
     READ_ANNOTATION_JSON = "read_annotation_json"
     WRITE_FILE = "write_file"
-    DETECT_BATCH = "detect_batch"
+    AUTO_ANNOTATE = "auto_annotate"
     MUTATE_ANNOTATION = "mutate_annotation_cap"
     ANALYZE_DATA = "analyze_data_cap"
     QUERY_CONTEXT = "query_context"
@@ -38,7 +38,7 @@ TOOL_CAPABILITY_MAP: dict[str, ToolCapability] = {
     "read_image_for_vision": ToolCapability.READ_IMAGE_VISION,
     "read_file_annotation": ToolCapability.READ_ANNOTATION_JSON,
     "write_workspace_file": ToolCapability.WRITE_FILE,
-    "execute_batch_annotation": ToolCapability.DETECT_BATCH,
+    "auto_annotate": ToolCapability.AUTO_ANNOTATE,
     "mutate_annotation": ToolCapability.MUTATE_ANNOTATION,
     "analyze_data": ToolCapability.ANALYZE_DATA,
     "get_account_summary": ToolCapability.QUERY_CONTEXT,
@@ -64,7 +64,7 @@ TOOL_RUNNERS: dict[str, ToolRunner] = {
     "read_image_for_vision": ToolRunner.SYNC,
     "read_document_file": ToolRunner.SYNC,
     "write_workspace_file": ToolRunner.PROPOSAL,
-    "execute_batch_annotation": ToolRunner.ASYNC,
+    "auto_annotate": ToolRunner.ASYNC,
     "mutate_annotation": ToolRunner.ASYNC,
     "analyze_data": ToolRunner.ASYNC,
 }

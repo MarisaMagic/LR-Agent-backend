@@ -12,6 +12,10 @@ MCP Server 地址由客户端通过 client_context.mcp_server_url 字段传入�
   - yolo_detect           本地 YOLO 推理
   - write_workspace_file  写工作区文本文件
   - list_project_images   枚举项目图片
+  - memory_read           读取记忆 topic 文件
+  - memory_write          写入记忆 topic 文件
+  - read_agent_skill      读取全局 Agent Skill 的 SKILL.md 正文（走默认 SYNC runner，
+                          与 canonical 工具无能力冲突，_infer_mcp_capability 返回 None）
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ def _infer_mcp_capability(tool_name: str) -> ToolCapability | None:
     if tool_name in ("write_workspace_file",):
         return ToolCapability.WRITE_FILE
     if tool_name in ("yolo_detect",):
-        return ToolCapability.DETECT_BATCH
+        return ToolCapability.AUTO_ANNOTATE
     if tool_name in ("list_project_images",):
         return ToolCapability.QUERY_CONTEXT
     return None

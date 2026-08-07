@@ -14,10 +14,10 @@ def test_normalize_api_tool_calls_standard() -> None:
 
 
 def test_normalize_skips_completed_api_calls() -> None:
-    api = [{"id": "t1", "name": "execute_batch_annotation", "args": {}}]
+    api = [{"id": "t1", "name": "auto_annotate", "args": {}}]
     resolved = normalize_api_tool_calls(
         api_tool_calls=api,
-        completed_tools=frozenset({"execute_batch_annotation"}),
+        completed_tools=frozenset({"auto_annotate"}),
     )
     assert resolved == []
 

@@ -41,7 +41,7 @@ ANNOTATION_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "describe_annotation_project",
         "read_file_annotation",
-        "execute_batch_annotation",
+        "auto_annotate",
         "mutate_annotation",
         "analyze_data",
     }
@@ -49,9 +49,16 @@ ANNOTATION_TOOL_NAMES: frozenset[str] = frozenset(
 
 
 # Pydantic args_schema for client tools — forces LLM to include user_request as a required param
-class BatchAnnotationArgs(BaseModel):
+class AutoAnnotateArgs(BaseModel):
     user_request: str = Field(min_length=1, description="必须原样传递用户的原始请求")
-    scope_hint: str | None = Field(default=None, description="可选范围补充说明")
+    scope_hint: str | None = Field(
+        default=None,
+        description=(
+            "标注文件范围，从 list_workspace_directory 返回的 relativePath 中选取。"
+            "单个文件填相对路径；多个用逗号分隔；整个目录填目录名加 /；"
+            "不填则对项目内全部文件执行标注。"
+        ),
+    )
 
 
 class MutateAnnotationArgs(BaseModel):
@@ -290,25 +297,34 @@ def _build_all_tools(
         ),
         # ── 客户端工具（schema 存根，实现体在前端 Electron 进程）────────────
         StructuredTool.from_function(
-            func=_client_tool_stub("execute_batch_annotation"),
-            name="execute_batch_annotation",
+            func=_client_tool_stub("auto_annotate"),
+            name="auto_annotate",
             description=(
-                "【客户端工具】对标注项目中的图片批量运行目标检测并自动标注。"
-                "前端将启动 YOLO 推理 → 标签映射 → 生成标注提案等完整流水线。"
-                "调用前不要 read_image_for_vision。"
-                "user_request：必须原样传递用户原话（如「标注 data 文件夹下所有图片」），"
-                "不要改写为单张路径，不要自行指定标签 ID。"
-                "scope_hint（可选）：范围补充说明（如「仅限子目录 train/」）。"
+                "【客户端工具】对当前标注项目执行自动标注。"
+                "支持全部标注类型：矩形框目标检测（bbox）、图片描述（caption）、"
+                "图片分类（classification）、指令数据（instruction）、"
+                "思维链（cot）、多轮对话（conversation）、偏好数据（preference）。"
+                "前端将根据项目类型自动选择检测流水线或 LLM 生成流水线。"
+                "user_request：必须原样传递用户的原始请求。"
+                "scope_hint：指定要标注的文件或子目录。"
+                "值取自 list_workspace_directory 返回的 relativePath："
+                "单文件填相对路径，多文件用逗号分隔，目录加 / 后缀。"
+                "不填 scope_hint 时：图片类扫描项目内全部图片，"
+                "文本类（instruction/cot/conversation/preference）扫描全部 .txt/.md/.json/.jsonl 源文件；"
+                "scope_hint 未命中时会回退到全部候选文件。"
+                "调用前建议先用 list_workspace_directory 浏览文件结构，"
+                "图片类项目可用 read_image_for_vision 预览，"
+                "文本类项目可用 read_workspace_file 读取原文。"
                 "必须发起真实 tool call，正文伪代码无效。"
             ),
-            args_schema=BatchAnnotationArgs,
+            args_schema=AutoAnnotateArgs,
         ),
         StructuredTool.from_function(
             func=_client_tool_stub("mutate_annotation"),
             name="mutate_annotation",
             description=(
-                "【客户端工具】修改或删除项目中已有的标注框（改标签、删框、批量纠错）。"
-                "不包含新增检测框；如需新增请使用 execute_batch_annotation。"
+                "【客户端工具】修改或删除项目中已有的标注（改标签、删框、批量纠错）。"
+                "不包含新增标注；如需新增请使用 auto_annotate。"
                 "user_request：用户原始请求（如「把所有 dog 标签改为 puppy」）。"
                 "调用后前端生成变更提案，用户确认后执行写入。"
             ),

@@ -1,46 +1,51 @@
-"""工作区可写文本/代码文件后缀白名单（与前端 workspaceTextExtensions 保持一致）。"""
+"""工作区文本文件策略：二进制/富媒体黑名单 + 默认文本可写。
+
+须与 LR-Agent-frontend/src/shared/workspaceTextExtensions.ts 保持同步。
+"""
 
 from __future__ import annotations
 
-ALLOWED_TEXT_FILE_EXTENSIONS: frozenset[str] = frozenset(
+# 禁止 write_workspace_file / 文本编辑的扩展名
+TEXT_WRITE_BLOCKLIST: frozenset[str] = frozenset(
     {
-        ".md",
-        ".txt",
-        ".json",
-        ".yaml",
-        ".yml",
-        ".csv",
-        ".tsv",
-        ".xml",
-        ".html",
-        ".htm",
-        ".rst",
-        ".py",
-        ".js",
-        ".ts",
-        ".tsx",
-        ".jsx",
-        ".cpp",
-        ".cc",
-        ".cxx",
-        ".c",
-        ".h",
-        ".hpp",
-        ".cs",
-        ".java",
-        ".go",
-        ".rs",
-        ".sql",
-        ".sh",
-        ".bat",
-        ".ps1",
-        ".toml",
-        ".ini",
-        ".cfg",
-        ".env",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".bmp",
+        ".ico",
+        ".svg",
+        ".pdf",
+        ".docx",
+        ".doc",
+        ".zip",
+        ".rar",
+        ".7z",
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".mp3",
+        ".mp4",
+        ".avi",
+        ".mov",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".otf",
     }
 )
 
+# read_workspace_file 禁止当纯文本读取的格式（与写盘黑名单一致）
+TEXT_BLOCKLIST_SUFFIXES = TEXT_WRITE_BLOCKLIST
+
+
+def is_blocked_text_extension(ext: str) -> bool:
+    normalized = ext.lower() if ext.startswith(".") else f".{ext.lower()}"
+    return normalized in TEXT_WRITE_BLOCKLIST
+
 
 def is_allowed_text_extension(ext: str) -> bool:
-    return ext.lower() in ALLOWED_TEXT_FILE_EXTENSIONS
+    """非黑名单扩展名均可写（兼容旧调用方）。"""
+    return not is_blocked_text_extension(ext)

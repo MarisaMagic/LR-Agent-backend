@@ -30,6 +30,7 @@ class AnnotationLlmBaseRequest(BaseModel):
 class MutationPrepareRequest(AnnotationLlmBaseRequest):
     user_request: str = Field(min_length=1, max_length=20_000)
     session_id: str | None = Field(default=None, max_length=64)
+    conversation_transcript: str = Field(default="", max_length=24_000)
     current_relative_path: str = ""
     candidates: list[ImageCandidateInput] = Field(default_factory=list)
     label_candidates: list[dict[str, Any]] = Field(default_factory=list)
@@ -46,6 +47,7 @@ class BatchPrepareRequest(AnnotationLlmBaseRequest):
         description="客户端显式指定的图片路径（如 UI 勾选）；非空则跳过 LLM 选图，仅生成执行计划",
     )
     session_id: str | None = Field(default=None, max_length=64)
+    conversation_transcript: str = Field(default="", max_length=24_000)
     current_relative_path: str = ""
     candidates: list[ImageCandidateInput] = Field(default_factory=list)
     label_candidates: list[dict[str, Any]] = Field(default_factory=list)

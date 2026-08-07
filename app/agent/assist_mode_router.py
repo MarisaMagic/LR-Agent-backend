@@ -37,7 +37,7 @@ FULL_TOOL_SET: frozenset[str] = frozenset({
     "read_document_file",
     "read_image_for_vision",
     "write_workspace_file",
-    "execute_batch_annotation",
+    "auto_annotate",
     "mutate_annotation",
     "analyze_data",
     "get_account_summary",
