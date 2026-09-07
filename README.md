@@ -1,14 +1,15 @@
 # LR-Agent Backend
 
-FastAPI 后端服务，为 LR-Agent Electron 客户端提供用户认证、Assist 对话编排与标注 LLM 能力。
+FastAPI 云端后端，为 LR-Agent Electron 客户端提供**用户认证与账号管理**。
+
+> Agent 编排（Assist 工具循环、标注 / 质量报告 LLM）已迁移至本机服务
+> `LR-Agent-local`（由 Electron 主进程 spawn，仅监听 127.0.0.1），本后端不再承担。
 
 ## 架构说明
 
 - **Electron 本地**：Agent 会话/消息、LLM Provider 配置（SQLite）
-- **后端云端**：
-  - 用户认证与资料（auth / users）
-  - Assist 工具模式 SSE（`/agent/chat/stream`）
-  - 标注/分析/质量报告 LLM 微服务（请求体直传 `api_key/base_url/model`）
+- **LR-Agent-local（本机）**：Assist 工具循环 SSE、标注/质量报告 LLM 编排
+- **本后端（云端）**：用户认证与资料（auth / users），仅保留账号体系
 
 ## 技术栈
 
@@ -16,7 +17,6 @@ FastAPI 后端服务，为 LR-Agent Electron 客户端提供用户认证、Assis
 - SQLAlchemy 2.0 (async) + Alembic
 - PostgreSQL 17 + Redis 7 + MinIO
 - JWT (Access + Refresh) + Argon2
-- LangChain（Assist 与标注 LLM 编排）
 
 ## 快速开始
 
@@ -76,10 +76,9 @@ app/
 ├── core/                # 配置、安全、依赖注入
 ├── db/                  # 数据库会话、Redis 连接
 ├── models/              # SQLAlchemy 模型（users）
-├── schemas/             # Pydantic DTO
-├── agent/               # Assist / 标注 / 分析 LLM 逻辑
-├── api/v1/              # 路由
-├── services/            # 业务逻辑
+├── schemas/             # Pydantic DTO（user）
+├── api/v1/              # 路由（auth / users）
+├── services/            # 业务逻辑（认证、资料、头像、邮件）
 └── middleware/          # 限流等中间件
 ```
 
@@ -92,19 +91,6 @@ app/
 - `GET/PATCH /users/me`
 - MinIO 头像上传
 - Redis refresh token 轮换与 reuse 检测
-
-### Agent Assist
-
-- `POST /api/v1/agent/chat/stream` — 无状态 SSE（前端直传 Provider 配置）
-- `POST /api/v1/agent/chat/cancel` — 取消生成任务
-- Assist 工具循环（工作区搜索、文件读取、MCP 等）
-
-### 标注 / 分析 / 质量 LLM
-
-- `POST /api/v1/agent/annotation/*` — 批量准备、标签映射、评判等
-- `POST /api/v1/agent/analysis/prepare` — 数据分析脚本生成
-- `POST /api/v1/agent/analysis/summarize/stream` — 分析结果解读
-- `POST /api/v1/agent/annotation-quality/report/compose/stream` — 质量报告撰写
 
 ## API 概览
 
@@ -122,11 +108,6 @@ app/
 | GET/PATCH | `/api/v1/users/me` | 用户资料 |
 | POST/DELETE | `/api/v1/users/me/avatar` | 头像上传/删除 |
 | POST | `/api/v1/users/me/delete-account` | 注销账号（软删除，需密码） |
-| POST | `/api/v1/agent/chat/stream` | Assist SSE 流式对话 |
-| POST | `/api/v1/agent/chat/cancel` | 取消 Assist 任务 |
-| POST | `/api/v1/agent/annotation/*` | 标注 LLM 服务 |
-| POST | `/api/v1/agent/analysis/*` | 数据分析 LLM 服务 |
-| POST | `/api/v1/agent/annotation-quality/*` | 质量报告 LLM 服务 |
 
 ## 测试
 

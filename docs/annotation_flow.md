@@ -2,17 +2,16 @@
 
 ## 流程概览
 
-标注操作（批量标注、标注变更、数据分析）的**唯一用户入口**是 Agent 工具 `execute_batch_annotation`、`mutate_annotation`、`analyze_data`。
+标注操作（批量标注、标注变更）的**唯一用户入口**是 Agent 工具 `execute_batch_annotation`、`mutate_annotation`。
 
 ```
 1. 用户请求 → Agent（后端 assist）
-2. Agent tool call: execute_batch_annotation / mutate_annotation / analyze_data
+2. Agent tool call: execute_batch_annotation / mutate_annotation
 3. tool_pending → 前端 agentJobRegistry.runClientTool(toolName)
 4. 对应流水线:
    - execute_batch_annotation → annotationBatchJob.ts → batchOrchestrator.ts
    - mutate_annotation → annotationMutationBatchJob.ts → mutationOrchestrator.ts
-   - analyze_data → analysisBatchJob.ts → dataAnalysisRunner.ts
-5. 主进程推理/执行: inferenceProcess (YOLO) / analysisProcess (Python sandbox)
+5. 主进程推理/执行: inferenceProcess (YOLO)
 6. 后端 annotation/ 服务函数: batch_prepare, judge_labels, map_labels 等
 7. 生成提案 → 用户确认 → 应用提案
 ```
@@ -27,7 +26,7 @@
 - `mutation_prepare_service` — 标注变更准备
 - `heuristic_map_service` — 启发式标签映射
 
-这些函数通过独立 API 暴露 (`api/v1/annotation_agent.py`、`api/v1/agent_analysis.py`),
+这些函数通过独立 API 暴露 (`api/v1/annotation_agent.py`),
 但标注的**用户入口**必须通过 Agent 工具链 (`execute_batch_annotation`)。
 
 ## 前端流水线
@@ -41,10 +40,8 @@
 `src/renderer/services/`:
 - `annotationBatchJob.ts` — 批量标注入口
 - `annotationMutationBatchJob.ts` — 标注变更入口
-- `analysisBatchJob.ts` — 数据分析入口
 - `agentJobRegistry.ts` — 客户端工具调度中心
 
 `src/main/`:
 - `preAnnot/inferenceProcess.ts` — YOLO 推理子进程
-- `analysis/analysisProcess.ts` — Python 分析子进程
 - `annotation/annotationStore.ts` — 标注持久化

@@ -54,50 +54,6 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:1212"]
 
-    agent_max_tool_rounds: int = 20
-    agent_job_cancel_ttl_seconds: int = 3600
-    agent_default_max_context_tokens: int = 12_000
-    agent_default_reserve_completion_tokens: int = 2_048
-    agent_default_max_turns_in_window: int = 20
-    agent_default_summarize_trigger_ratio: float = 0.85
-    agent_default_min_turns_before_summarize: int = 6
-    agent_stream_rate_limit_per_minute: int = 10
-    agent_stream_rate_limit_per_day: int = 200
-
-    llm_base_url_allow_http: bool = False
-
-    # When true, batch annotation follows fusion-reasoning tool chain (ReAct sub-agent).
-    annotation_fusion_parity: bool = True
-    annotation_sub_agent_max_iterations: int = 12
-    annotation_sub_agent_max_rounds: int = 10
-    annotation_vision_map_concurrency: int = 3
-    annotation_llm_temperature: float = 0.0
-    annotation_prepare_temperature: float = 0.1
-    annotation_vision_map_validate: bool = True
-    annotation_vision_map_max_retries: int = 1
-    annotation_judge_enabled: bool = True
-    annotation_judge_max_retries: int = 1
-    annotation_judge_reject_submit_partial: bool = True
-    annotation_judge_temperature: float = 0.0
-    annotation_label_pool_preflight: Literal["off", "auto", "always"] = "auto"
-    annotation_label_pool_preflight_min_extra: int = 2
-    agent_chat_vision_max_edge: int = 1280
-    agent_chat_vision_jpeg_quality: int = 85
-    agent_read_file_max_bytes: int = 524_288
-    agent_read_file_max_lines: int = 2000
-    agent_read_document_max_pages: int = 30
-    agent_grep_max_results: int = 50
-    agent_grep_max_files_scanned: int = 500
-    agent_list_dir_max_entries: int = 80
-
-    agent_mutation_enabled: bool = True
-    agent_analysis_enabled: bool = True
-    agent_document_write_enabled: bool = True
-    agent_analysis_timeout_seconds: int = 60
-    agent_analysis_max_stdout_bytes: int = 1_048_576
-    agent_analysis_rate_limit_per_hour: int = 20
-    agent_analysis_snapshot_max_bytes: int = 2_097_152
-
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
