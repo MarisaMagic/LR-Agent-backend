@@ -1,0 +1,29 @@
+# 版本控制
+.git
+.gitignore
+.gitattributes
+
+# 密钥与本地环境文件（坚决不进构建上下文）
+.env
+.env.*
+docker/.env*
+!docker/.env.prod.example
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 测试、脚本与文档（镜像构建不需要）
+tests/
+scripts/
+diag_output/
+docs/
+
+# 虚拟环境与编辑器
+.venv/
+venv/
+.idea/
+.vscode/
+*.swp
+*.log

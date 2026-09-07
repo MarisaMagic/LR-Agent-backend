@@ -1,0 +1,13 @@
+{
+	email {$ACME_EMAIL}
+}
+
+# 后端 API（证书自动签发与续期）
+api.{$DOMAIN} {
+	reverse_proxy api:8000
+}
+
+# MinIO 对象存储（公开读头像等资源）
+minio.{$DOMAIN} {
+	reverse_proxy minio:9000
+}

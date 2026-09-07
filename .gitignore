@@ -23,8 +23,9 @@ htmlcov/
 # Alembic / local
 *.log
 
-# Docker local overrides (keep .env.example)
+# Docker local overrides (keep .env.prod.example)
 docker/.env
+docker/.env.prod
 
 # Vision map diagnostic script output & local test inputs
 diag_output/

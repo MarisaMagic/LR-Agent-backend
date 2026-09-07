@@ -68,6 +68,51 @@ docker compose up -d --build
 
 API 容器启动时会自动执行 `alembic upgrade head`，并在 lifespan 中初始化 MinIO bucket。
 
+## 生产部署（VPS + 域名反代）
+
+后端以 docker 镜像形式部署，PostgreSQL / Redis / MinIO 全部 compose 自托管，仅 Caddy 的 80/443 对公网开放（Let's Encrypt 自动 HTTPS）。
+
+### 0. 前置条件
+
+- 服务器已安装 Docker + Compose v2
+- 域名两条 A 记录指向服务器 IP：`api.<domain>`、`minio.<domain>`
+- 防火墙放行 80 / 443
+
+### 1. 配置
+
+```bash
+cd docker
+cp .env.prod.example .env.prod
+# 编辑 .env.prod：填 DOMAIN、ACME_EMAIL、FRONTEND_HOST，
+# 并用 openssl rand -hex 32 生成 SECRET_KEY、各类密码
+```
+
+### 2. 构建并启动
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+```
+
+entrypoint 会自动执行数据库迁移；MinIO 桶与头像公开读策略在 api 启动时初始化。
+
+### 3. 验证与操作
+
+```bash
+curl https://api.<domain>/health          # 期望 {"status":"ok"...}
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs -f api
+docker compose -f docker-compose.prod.yml --env-file .env.prod down   # 停止（保留数据卷）
+```
+
+> 迁移/备份：数据在命名卷 `lr-agent-pg-data`、`lr-agent-redis-data`、`lr-agent-minio-data` 中；
+> 升级代码一律 `up -d --build`，迁移由 entrypoint 幂等执行。
+
+### 4. 客户端契约
+
+Electron 客户端构建时必须把后端地址写入产物：`API_BASE_URL=https://api.<domain>/api/v1`
+（dev 环境的 `resolveApiBaseUrl()` 按 serving host 的 8000 端口回退，反代 + HTTPS 场景不适用）。
+对应的 CORS 白名单由 `FRONTEND_HOST` 控制；若打包客户端以 `file://` 协议直连后端仍被 CORS 拦截，
+需在 `CORS_ORIGINS` 中追加 `"null"` 或经主进程代理转发。
+
 ## 项目结构
 
 ```
