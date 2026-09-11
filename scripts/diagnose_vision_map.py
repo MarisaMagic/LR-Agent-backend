@@ -43,7 +43,7 @@ from typing import Any
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 
 ROOT = Path(__file__).resolve().parents[1]
-INFERENCE_ROOT = ROOT.parent / "LR-Agent-inference"
+INFERENCE_ROOT = ROOT.parent / "LR-Agent" / "vendor" / "inference"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -225,7 +225,7 @@ def detect_boxes_yolo(
     inference_python: str = "",
     verbose: bool = True,
 ) -> list[dict]:
-    """调用 LR-Agent-inference YOLO，返回与批量标注一致的归一化框列表。"""
+    """调用 vendor/inference YOLO，返回与批量标注一致的归一化框列表。"""
     ckpt = Path(checkpoint).resolve()
     if not ckpt.is_file():
         raise SystemExit(f"YOLO 权重不存在: {ckpt}")
